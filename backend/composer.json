@@ -1,1 +1,20 @@
-
+{
+    "name": "thinkplus/scan-id",
+    "description": "SCAN-ID — Lost ID Recovery Network Kenya",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.2",
+        "vlucas/phpdotenv": "^5.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "ScanId\\": "src/"
+        }
+    },
+    "scripts": {
+        "serve": "php -S localhost:8000 -t public"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
