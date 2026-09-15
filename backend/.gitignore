@@ -1,1 +1,43 @@
+# ============================================================
+# SCAN-ID — Backend Git Ignore
+# ============================================================
 
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Composer
+/vendor/
+
+# Logs
+*.log
+logs/
+
+# Runtime / cache
+/cache/
+/tmp/
+/storage/cache/
+/storage/logs/
+
+# Uploaded files
+/storage/uploads/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+# PHPUnit
+.phpunit.result.cache
+
+# Coverage
+/coverage/
+
+# Local development
+docker-compose.override.yml
