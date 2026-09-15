@@ -8,6 +8,7 @@ export default defineConfig({
 
         VitePWA({
             registerType: "autoUpdate",
+            injectRegister: "auto",
 
             includeAssets: [
                 "favicon.ico",
@@ -29,19 +30,18 @@ export default defineConfig({
                 start_url: "/",
                 categories: [
                     "security",
-                    "utilities",
-                    "social"
+                    "utilities"
                 ],
 
                 icons: [
                     {
-                        src: "/icons/icon-192.png",
+                        src: "icons/icon-192.png",
                         sizes: "192x192",
                         type: "image/png",
                         purpose: "any"
                     },
                     {
-                        src: "/icons/icon-512.png",
+                        src: "icons/icon-512.png",
                         sizes: "512x512",
                         type: "image/png",
                         purpose: "any"
@@ -51,6 +51,9 @@ export default defineConfig({
 
             workbox: {
                 cleanupOutdatedCaches: true,
+                globPatterns: [
+                    "**/*.{js,css,html,ico,png,svg,webp,woff2}"
+                ],
                 navigateFallback: "/index.html"
             },
 
