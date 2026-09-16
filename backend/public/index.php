@@ -2,16 +2,11 @@
 
 declare(strict_types=1);
 
-/**
- * ============================================================
- * SCAN-ID
- * Public API Entry Point
- * ============================================================
- */
-
 use ScanId\Config\Database;
 use ScanId\Http\Cors;
+use ScanId\Http\Request;
 use ScanId\Http\Response;
+use ScanId\Http\Router;
 
 /*
 |--------------------------------------------------------------------------
@@ -31,52 +26,11 @@ Cors::apply();
 
 /*
 |--------------------------------------------------------------------------
-| Request Information
+| Router
 |--------------------------------------------------------------------------
 */
 
-$method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
-
-$uri = parse_url(
-    $_SERVER['REQUEST_URI'] ?? '/',
-    PHP_URL_PATH
-) ?: '/';
-
-/*
-|--------------------------------------------------------------------------
-| Remove API prefix
-|--------------------------------------------------------------------------
-*/
-
-$path = preg_replace(
-    '#^/api#',
-    '',
-    $uri
-) ?: '/';
-
-$path = '/' . trim($path, '/');
-
-if ($path === '//') {
-    $path = '/';
-}
-
-/*
-|--------------------------------------------------------------------------
-| Health Check
-|--------------------------------------------------------------------------
-*/
-
-if ($method === 'GET' && $path === '/health') {
-    Response::success([
-        'app' => $application['name'],
-        'environment' => $application['environment'],
-        'status' => 'healthy',
-        'database' => Database::ping()
-            ? 'connected'
-            : 'unavailable',
-        'timestamp' => date(DATE_ATOM),
-    ]);
-}
+$router = new Router();
 
 /*
 |--------------------------------------------------------------------------
@@ -84,21 +38,38 @@ if ($method === 'GET' && $path === '/health') {
 |--------------------------------------------------------------------------
 */
 
-if ($method === 'GET' && $path === '/') {
+$router->get('/api', function () use ($application): never {
     Response::success([
         'app' => $application['name'],
         'message' => 'SCAN-ID API is running.',
         'version' => '1.0.0',
     ]);
-}
+});
 
 /*
 |--------------------------------------------------------------------------
-| Route Not Found
+| Health Check
 |--------------------------------------------------------------------------
 */
 
-Response::error(
-    'API endpoint not found.',
-    404
+$router->get('/api/health', function (): never {
+    Response::success([
+        'app' => $_ENV['APP_NAME'] ?? 'SCAN-ID',
+        'status' => 'healthy',
+        'database' => Database::ping()
+            ? 'connected'
+            : 'unavailable',
+        'timestamp' => date(DATE_ATOM),
+    ]);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Dispatch Request
+|--------------------------------------------------------------------------
+*/
+
+$router->dispatch(
+    Request::method(),
+    Request::path()
 );
