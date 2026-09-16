@@ -1,1 +1,4 @@
+User-agent: *
+Allow: /
 
+Sitemap: https://jose-ctr.github.io/SCAN-ID/sitemap.xml
