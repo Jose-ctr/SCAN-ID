@@ -1,1 +1,25 @@
+# ============================================================
+# SCAN-ID — Apache API Routing
+# ============================================================
 
+RewriteEngine On
+
+# ------------------------------------------------------------
+# Preserve Authorization header
+# ------------------------------------------------------------
+
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+# ------------------------------------------------------------
+# Do not rewrite existing files or directories
+# ------------------------------------------------------------
+
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# ------------------------------------------------------------
+# Route all API requests to index.php
+# ------------------------------------------------------------
+
+RewriteRule ^ index.php [L]
