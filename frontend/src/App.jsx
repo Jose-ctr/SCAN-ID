@@ -2,32 +2,55 @@ import { useState } from "react";
 
 function App() {
     const [activeAction, setActiveAction] = useState(null);
+    const [foundForm, setFoundForm] = useState({
+        idType: "",
+        idNumber: "",
+        location: "",
+        phone: "",
+    });
+    const [recoveryForm, setRecoveryForm] = useState({
+        reference: "",
+        phone: "",
+    });
+    const [submitted, setSubmitted] = useState(false);
 
-    const actions = {
-        scan: {
-            title: "Scan Found ID",
-            message:
-                "The ID scanner will be connected in the next development stage.",
-        },
-        found: {
-            title: "Report Found ID",
-            message:
-                "The secure found-ID form will be connected to the backend next.",
-        },
-        recovery: {
-            title: "Recover My ID",
-            message:
-                "Recovery lookup will allow an owner to check the status of their ID.",
-        },
-    };
-
-    const handleAction = (action) => {
+    const openAction = (action) => {
         setActiveAction(action);
+        setSubmitted(false);
     };
 
-    const currentAction = activeAction
-        ? actions[activeAction]
-        : null;
+    const closeAction = () => {
+        setActiveAction(null);
+        setSubmitted(false);
+    };
+
+    const handleFoundChange = (event) => {
+        const { name, value } = event.target;
+
+        setFoundForm((current) => ({
+            ...current,
+            [name]: value,
+        }));
+    };
+
+    const handleRecoveryChange = (event) => {
+        const { name, value } = event.target;
+
+        setRecoveryForm((current) => ({
+            ...current,
+            [name]: value,
+        }));
+    };
+
+    const handleFoundSubmit = (event) => {
+        event.preventDefault();
+        setSubmitted(true);
+    };
+
+    const handleRecoverySubmit = (event) => {
+        event.preventDefault();
+        setSubmitted(true);
+    };
 
     return (
         <div className="app-shell">
@@ -60,15 +83,14 @@ function App() {
                     <h1>Found an ID?</h1>
 
                     <p>
-                        Help return it to its owner. Scan the ID,
-                        notify the owner by SMS, and arrange a safe
-                        handover.
+                        Help return it to its owner. Start a secure
+                        recovery request below.
                     </p>
 
                     <button
                         className="primary-button"
                         type="button"
-                        onClick={() => handleAction("scan")}
+                        onClick={() => openAction("scan")}
                     >
                         Scan Found ID
                     </button>
@@ -81,7 +103,7 @@ function App() {
                     <button
                         className="info-card"
                         type="button"
-                        onClick={() => handleAction("found")}
+                        onClick={() => openAction("found")}
                     >
                         <span
                             className="info-icon"
@@ -100,7 +122,7 @@ function App() {
                     <button
                         className="info-card"
                         type="button"
-                        onClick={() => handleAction("recovery")}
+                        onClick={() => openAction("recovery")}
                     >
                         <span
                             className="info-icon"
@@ -177,26 +199,230 @@ function App() {
                     </div>
                 </section>
 
-                {currentAction && (
+                {activeAction === "scan" && (
                     <section
                         className="action-message"
                         aria-live="polite"
                     >
-                        <strong>
-                            {currentAction.title}
-                        </strong>
+                        <strong>Scan Found ID</strong>
 
                         <p>
-                            {currentAction.message}
+                            Camera scanning will be connected in the
+                            next stage. For now, you can report the
+                            found ID manually.
                         </p>
+
+                        <button
+                            className="primary-button"
+                            type="button"
+                            onClick={() => openAction("found")}
+                        >
+                            Report Manually
+                        </button>
 
                         <button
                             className="secondary-button"
                             type="button"
-                            onClick={() => setActiveAction(null)}
+                            onClick={closeAction}
                         >
                             Close
                         </button>
+                    </section>
+                )}
+
+                {activeAction === "found" && (
+                    <section className="action-message">
+                        <strong>Report Found ID</strong>
+
+                        {submitted ? (
+                            <>
+                                <p>
+                                    Your found-ID report has been
+                                    prepared successfully.
+                                </p>
+
+                                <p>
+                                    Backend submission and SMS
+                                    notification will be connected
+                                    in the next development stage.
+                                </p>
+
+                                <button
+                                    className="secondary-button"
+                                    type="button"
+                                    onClick={closeAction}
+                                >
+                                    Done
+                                </button>
+                            </>
+                        ) : (
+                            <form onSubmit={handleFoundSubmit}>
+                                <label htmlFor="idType">
+                                    ID type
+                                </label>
+
+                                <select
+                                    id="idType"
+                                    name="idType"
+                                    value={foundForm.idType}
+                                    onChange={handleFoundChange}
+                                    required
+                                >
+                                    <option value="">
+                                        Select ID type
+                                    </option>
+                                    <option value="national-id">
+                                        National ID
+                                    </option>
+                                    <option value="passport">
+                                        Passport
+                                    </option>
+                                    <option value="driving-license">
+                                        Driving Licence
+                                    </option>
+                                    <option value="student-id">
+                                        Student ID
+                                    </option>
+                                    <option value="other">
+                                        Other
+                                    </option>
+                                </select>
+
+                                <label htmlFor="idNumber">
+                                    ID number
+                                </label>
+
+                                <input
+                                    id="idNumber"
+                                    name="idNumber"
+                                    type="text"
+                                    value={foundForm.idNumber}
+                                    onChange={handleFoundChange}
+                                    placeholder="Enter ID number"
+                                    autoComplete="off"
+                                    required
+                                />
+
+                                <label htmlFor="location">
+                                    Where was it found?
+                                </label>
+
+                                <input
+                                    id="location"
+                                    name="location"
+                                    type="text"
+                                    value={foundForm.location}
+                                    onChange={handleFoundChange}
+                                    placeholder="e.g. Mariakani Stage"
+                                    required
+                                />
+
+                                <label htmlFor="phone">
+                                    Your phone number
+                                </label>
+
+                                <input
+                                    id="phone"
+                                    name="phone"
+                                    type="tel"
+                                    value={foundForm.phone}
+                                    onChange={handleFoundChange}
+                                    placeholder="e.g. 07XXXXXXXX"
+                                    autoComplete="tel"
+                                    required
+                                />
+
+                                <button
+                                    className="primary-button"
+                                    type="submit"
+                                >
+                                    Prepare Report
+                                </button>
+
+                                <button
+                                    className="secondary-button"
+                                    type="button"
+                                    onClick={closeAction}
+                                >
+                                    Cancel
+                                </button>
+                            </form>
+                        )}
+                    </section>
+                )}
+
+                {activeAction === "recovery" && (
+                    <section className="action-message">
+                        <strong>Recover My ID</strong>
+
+                        {submitted ? (
+                            <>
+                                <p>
+                                    Your recovery lookup request has
+                                    been prepared.
+                                </p>
+
+                                <p>
+                                    Live recovery-status lookup will
+                                    be connected to the backend next.
+                                </p>
+
+                                <button
+                                    className="secondary-button"
+                                    type="button"
+                                    onClick={closeAction}
+                                >
+                                    Done
+                                </button>
+                            </>
+                        ) : (
+                            <form onSubmit={handleRecoverySubmit}>
+                                <label htmlFor="reference">
+                                    Recovery reference
+                                </label>
+
+                                <input
+                                    id="reference"
+                                    name="reference"
+                                    type="text"
+                                    value={recoveryForm.reference}
+                                    onChange={handleRecoveryChange}
+                                    placeholder="Enter recovery reference"
+                                    autoComplete="off"
+                                    required
+                                />
+
+                                <label htmlFor="recovery-phone">
+                                    Phone number
+                                </label>
+
+                                <input
+                                    id="recovery-phone"
+                                    name="phone"
+                                    type="tel"
+                                    value={recoveryForm.phone}
+                                    onChange={handleRecoveryChange}
+                                    placeholder="e.g. 07XXXXXXXX"
+                                    autoComplete="tel"
+                                    required
+                                />
+
+                                <button
+                                    className="primary-button"
+                                    type="submit"
+                                >
+                                    Check Status
+                                </button>
+
+                                <button
+                                    className="secondary-button"
+                                    type="button"
+                                    onClick={closeAction}
+                                >
+                                    Cancel
+                                </button>
+                            </form>
+                        )}
                     </section>
                 )}
             </main>
