@@ -11,20 +11,28 @@ final class AuthMiddleware
     /**
      * Require an authenticated user.
      *
+     * This method is used directly by controllers
+     * when the authenticated user data is needed.
+     *
      * @return array<string, mixed>
      */
     public static function requireUser(): array
     {
         $authorization = Request::authorization();
 
-        if ($authorization === null || $authorization === '') {
+        if (
+            $authorization === null ||
+            $authorization === ''
+        ) {
             Response::error(
                 'Authentication required.',
                 401
             );
         }
 
-        $token = self::extractBearerToken($authorization);
+        $token = self::extractBearerToken(
+            $authorization
+        );
 
         if ($token === null) {
             Response::error(
@@ -33,7 +41,9 @@ final class AuthMiddleware
             );
         }
 
-        $user = AuthService::userFromToken($token);
+        $user = AuthService::userFromToken(
+            $token
+        );
 
         if ($user === null) {
             Response::error(
@@ -46,12 +56,25 @@ final class AuthMiddleware
     }
 
     /**
-     * Extract a bearer token from an Authorization header.
+     * Router-compatible middleware entry point.
+     *
+     * The Router calls this method when a protected
+     * route uses AuthMiddleware::class.
+     */
+    public static function handle(): void
+    {
+        self::requireUser();
+    }
+
+    /**
+     * Extract a Bearer token from the Authorization header.
      */
     private static function extractBearerToken(
         string $authorization
     ): ?string {
-        $authorization = trim($authorization);
+        $authorization = trim(
+            $authorization
+        );
 
         if (
             !str_starts_with(
