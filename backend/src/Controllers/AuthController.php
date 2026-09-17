@@ -14,13 +14,18 @@ final class AuthController
 {
     /**
      * Register a new SCAN-ID account.
+     *
+     * @param array<string, string> $params
      */
-    public static function register(): never
-    {
+    public static function register(
+        array $params = []
+    ): never {
         $data = Request::json();
 
         try {
-            $user = AuthService::register($data);
+            $user = AuthService::register(
+                $data
+            );
 
             Response::success([
                 'user' => $user,
@@ -35,10 +40,13 @@ final class AuthController
     }
 
     /**
-     * Authenticate a user and create a session.
+     * Authenticate an existing user.
+     *
+     * @param array<string, string> $params
      */
-    public static function login(): never
-    {
+    public static function login(
+        array $params = []
+    ): never {
         $data = Request::json();
 
         $phone = trim(
@@ -49,8 +57,12 @@ final class AuthController
             $data['password'] ?? ''
         );
 
-        $deviceName = isset($data['device_name'])
-            ? trim((string) $data['device_name'])
+        $deviceName = isset(
+            $data['device_name']
+        )
+            ? trim(
+                (string) $data['device_name']
+            )
             : null;
 
         try {
@@ -76,9 +88,12 @@ final class AuthController
 
     /**
      * Return the currently authenticated user.
+     *
+     * @param array<string, string> $params
      */
-    public static function me(): never
-    {
+    public static function me(
+        array $params = []
+    ): never {
         $user = AuthMiddleware::requireUser();
 
         Response::success([
@@ -88,12 +103,18 @@ final class AuthController
 
     /**
      * Log out the current authentication session.
+     *
+     * @param array<string, string> $params
      */
-    public static function logout(): never
-    {
+    public static function logout(
+        array $params = []
+    ): never {
         $authorization = Request::authorization();
 
-        if ($authorization === null) {
+        if (
+            $authorization === null ||
+            $authorization === ''
+        ) {
             Response::error(
                 'Authentication required.',
                 401
@@ -113,7 +134,9 @@ final class AuthController
 
         AuthMiddleware::requireUser();
 
-        AuthService::logout($token);
+        AuthService::logout(
+            $token
+        );
 
         Response::success([
             'message' => 'Logged out successfully.',
@@ -121,12 +144,14 @@ final class AuthController
     }
 
     /**
-     * Extract a bearer token from an Authorization header.
+     * Extract a Bearer token from the Authorization header.
      */
     private static function extractBearerToken(
         string $authorization
     ): ?string {
-        $authorization = trim($authorization);
+        $authorization = trim(
+            $authorization
+        );
 
         if (
             !str_starts_with(
