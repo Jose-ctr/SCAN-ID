@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ScanId\Http;
 
 use JsonException;
+use RuntimeException;
 
 final class Request
 {
@@ -28,7 +29,9 @@ final class Request
             PHP_URL_PATH
         );
 
-        return $uri ?: '/';
+        return is_string($uri) && $uri !== ''
+            ? $uri
+            : '/';
     }
 
     /**
@@ -39,13 +42,13 @@ final class Request
         $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
 
         return str_contains(
-            strtolower($contentType),
+            strtolower((string) $contentType),
             'application/json'
         );
     }
 
     /**
-     * Read the JSON request body.
+     * Read and decode the JSON request body.
      *
      * @return array<string, mixed>
      */
@@ -69,12 +72,20 @@ final class Request
                 'Invalid JSON request body.',
                 400
             );
+
+            throw new RuntimeException(
+                'Unreachable JSON decoding state.'
+            );
         }
 
         if (!is_array($data)) {
             Response::error(
                 'JSON request body must be an object.',
                 400
+            );
+
+            throw new RuntimeException(
+                'Unreachable JSON validation state.'
             );
         }
 
@@ -101,7 +112,9 @@ final class Request
         mixed $default = null
     ): mixed {
         if (self::isJson()) {
-            return self::json()[$key] ?? $default;
+            $data = self::json();
+
+            return $data[$key] ?? $default;
         }
 
         return $_POST[$key] ?? $default;
@@ -114,13 +127,27 @@ final class Request
         string $name,
         ?string $default = null
     ): ?string {
-        $serverKey = 'HTTP_' . strtoupper(
+        $normalized = strtoupper(
             str_replace('-', '_', $name)
         );
 
-        return isset($_SERVER[$serverKey])
-            ? (string) $_SERVER[$serverKey]
-            : $default;
+        $serverKey = 'HTTP_' . $normalized;
+
+        if (isset($_SERVER[$serverKey])) {
+            return (string) $_SERVER[$serverKey];
+        }
+
+        /*
+         * Some CGI/FastCGI configurations expose the
+         * Authorization header using this alternate key.
+         */
+        $redirectedKey = 'REDIRECT_' . $serverKey;
+
+        if (isset($_SERVER[$redirectedKey])) {
+            return (string) $_SERVER[$redirectedKey];
+        }
+
+        return $default;
     }
 
     /**
@@ -132,13 +159,23 @@ final class Request
     }
 
     /**
-     * Get the client's IP address.
+     * Get the client's direct IP address.
+     *
+     * Do not trust forwarded IP headers unless trusted
+     * reverse-proxy configuration is introduced.
      */
     public static function ip(): ?string
     {
         $ip = $_SERVER['REMOTE_ADDR'] ?? null;
 
-        return is_string($ip) && $ip !== ''
+        if (!is_string($ip) || $ip === '') {
+            return null;
+        }
+
+        return filter_var(
+            $ip,
+            FILTER_VALIDATE_IP
+        ) !== false
             ? $ip
             : null;
     }
