@@ -16,8 +16,8 @@ export default defineConfig({
                 "favicon.ico",
                 "robots.txt",
                 "sitemap.xml",
-                "icons/icon-192.png",
-                "icons/icon-512.png"
+                "icon-192x192.png",
+                "icon-512x512.png"
             ],
 
             manifest: {
@@ -39,13 +39,13 @@ export default defineConfig({
 
                 icons: [
                     {
-                        src: "/SCAN-ID/icons/icon-192.png",
+                        src: "/SCAN-ID/icon-192x192.png",
                         sizes: "192x192",
                         type: "image/png",
                         purpose: "any maskable"
                     },
                     {
-                        src: "/SCAN-ID/icons/icon-512.png",
+                        src: "/SCAN-ID/icon-512x512.png",
                         sizes: "512x512",
                         type: "image/png",
                         purpose: "any maskable"
