@@ -12,6 +12,7 @@ declare(strict_types=1);
  * - Load Composer autoloader
  * - Load environment variables
  * - Configure application timezone
+ * - Configure PHP error handling
  * - Provide a single application bootstrap point
  *
  * IMPORTANT:
@@ -78,10 +79,12 @@ $appEnvironment = $_ENV['APP_ENV'] ?? 'local';
 
 if ($appEnvironment === 'production') {
     ini_set('display_errors', '0');
+    ini_set('display_startup_errors', '0');
     ini_set('log_errors', '1');
 } else {
     ini_set('display_errors', '1');
     ini_set('display_startup_errors', '1');
+    ini_set('log_errors', '1');
 }
 
 /*
@@ -92,14 +95,18 @@ if ($appEnvironment === 'production') {
 
 return [
     'name' => $_ENV['APP_NAME'] ?? 'SCAN-ID',
+
     'environment' => $appEnvironment,
+
     'debug' => filter_var(
         $_ENV['APP_DEBUG'] ?? false,
         FILTER_VALIDATE_BOOLEAN
     ),
+
     'url' => rtrim(
         $_ENV['APP_URL'] ?? 'http://localhost:8000',
         '/'
     ),
+
     'timezone' => $timezone,
 ];
