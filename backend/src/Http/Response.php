@@ -15,10 +15,13 @@ final class Response
         array $data = [],
         int $status = 200
     ): never {
-        self::json([
-            'success' => true,
-            'data' => $data,
-        ], $status);
+        self::json(
+            [
+                'success' => true,
+                'data' => $data,
+            ],
+            $status
+        );
     }
 
     /**
@@ -40,7 +43,10 @@ final class Response
             $response['errors'] = $errors;
         }
 
-        self::json($response, $status);
+        self::json(
+            $response,
+            $status
+        );
     }
 
     /**
@@ -54,7 +60,13 @@ final class Response
     ): never {
         http_response_code($status);
 
-        header('Content-Type: application/json; charset=utf-8');
+        header(
+            'Content-Type: application/json; charset=utf-8'
+        );
+
+        header(
+            'X-Content-Type-Options: nosniff'
+        );
 
         echo json_encode(
             $payload,
@@ -73,6 +85,15 @@ final class Response
     {
         http_response_code(204);
 
+        header('Content-Length: 0');
+
         exit;
+    }
+
+    /**
+     * Prevent accidental instantiation.
+     */
+    private function __construct()
+    {
     }
 }
