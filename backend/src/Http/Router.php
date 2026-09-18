@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScanId\Http;
 
+use RuntimeException;
 use Throwable;
 
 final class Router
@@ -12,7 +13,7 @@ final class Router
      * @var array<int, array{
      *     method: string,
      *     path: string,
-     *     handler: callable,
+     *     handler: callable|array,
      *     middleware: array<int, callable|string>,
      *     regex: string
      * }>
@@ -145,10 +146,12 @@ final class Router
             $middleware
         );
 
-        $callback($this);
-
-        $this->prefix = $previousPrefix;
-        $this->groupMiddleware = $previousMiddleware;
+        try {
+            $callback($this);
+        } finally {
+            $this->prefix = $previousPrefix;
+            $this->groupMiddleware = $previousMiddleware;
+        }
 
         return $this;
     }
@@ -190,13 +193,9 @@ final class Router
      * Convert route parameters such as /users/{id}
      * into a regular expression.
      */
-    private function pathToRegex(
-        string $path
-    ): string {
-        $quoted = preg_quote(
-            $path,
-            '#'
-        );
+    private function pathToRegex(string $path): string
+    {
+        $quoted = preg_quote($path, '#');
 
         $pattern = preg_replace_callback(
             '#\\\\\{([a-zA-Z_][a-zA-Z0-9_]*)\\\\\}#',
@@ -205,6 +204,12 @@ final class Router
             },
             $quoted
         );
+
+        if ($pattern === null) {
+            throw new RuntimeException(
+                'Unable to compile route pattern.'
+            );
+        }
 
         return '#^' . $pattern . '$#';
     }
@@ -248,9 +253,9 @@ final class Router
             );
 
             try {
-                $this->runMiddleware(
-                    $route['middleware']
-                );
+                if (!$this->runMiddleware($route['middleware'])) {
+                    return;
+                }
 
                 $this->runHandler(
                     $route['handler'],
@@ -259,9 +264,7 @@ final class Router
 
                 return;
             } catch (Throwable $exception) {
-                $this->handleException(
-                    $exception
-                );
+                $this->handleException($exception);
             }
         }
 
@@ -278,17 +281,19 @@ final class Router
      *
      * - a callable
      * - a class name with a static handle() method
+     *
+     * @param array<int, callable|string> $middleware
      */
     private function runMiddleware(
         array $middleware
-    ): void {
+    ): bool {
         foreach ($middleware as $item) {
             if (is_string($item)) {
                 if (
                     !class_exists($item) ||
                     !method_exists($item, 'handle')
                 ) {
-                    throw new \RuntimeException(
+                    throw new RuntimeException(
                         "Invalid middleware: {$item}"
                     );
                 }
@@ -302,16 +307,18 @@ final class Router
                 $result = $item();
 
                 if ($result === false) {
-                    return;
+                    return false;
                 }
 
                 continue;
             }
 
-            throw new \RuntimeException(
+            throw new RuntimeException(
                 'Invalid middleware definition.'
             );
         }
+
+        return true;
     }
 
     /**
@@ -325,7 +332,7 @@ final class Router
     ): void {
         if (is_array($handler)) {
             if (count($handler) !== 2) {
-                throw new \RuntimeException(
+                throw new RuntimeException(
                     'Invalid controller handler.'
                 );
             }
@@ -336,19 +343,19 @@ final class Router
                 !is_string($class) ||
                 !is_string($method)
             ) {
-                throw new \RuntimeException(
+                throw new RuntimeException(
                     'Invalid controller definition.'
                 );
             }
 
             if (!class_exists($class)) {
-                throw new \RuntimeException(
+                throw new RuntimeException(
                     "Controller not found: {$class}"
                 );
             }
 
             if (!method_exists($class, $method)) {
-                throw new \RuntimeException(
+                throw new RuntimeException(
                     "Controller method not found: {$class}::{$method}"
                 );
             }
@@ -388,10 +395,7 @@ final class Router
         string $path
     ): string {
         return $this->normalizePath(
-            $prefix . '/' . trim(
-                $path,
-                '/'
-            )
+            $prefix . '/' . trim($path, '/')
         );
     }
 
@@ -448,7 +452,10 @@ final class Router
         );
     }
 
-    private function __construct()
+    /**
+     * Allow the router to be instantiated.
+     */
+    public function __construct()
     {
     }
 }
