@@ -12,26 +12,22 @@ final class Cors
     public static function apply(): void
     {
         $allowedOrigin = $_ENV['CORS_ORIGIN'] ?? '';
-
         $requestOrigin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-        /*
-         * Only allow the configured frontend origin.
-         */
-        if (
+        $originAllowed = (
             $allowedOrigin !== '' &&
             $requestOrigin !== '' &&
             hash_equals($allowedOrigin, $requestOrigin)
-        ) {
-            header("Access-Control-Allow-Origin: {$allowedOrigin}");
-            header('Vary: Origin');
-        }
+        );
 
         /*
-         * Credentials are required for secure session-based
-         * authentication.
+         * Only allow the explicitly configured frontend origin.
          */
-        header('Access-Control-Allow-Credentials: true');
+        if ($originAllowed) {
+            header("Access-Control-Allow-Origin: {$allowedOrigin}");
+            header('Access-Control-Allow-Credentials: true');
+            header('Vary: Origin');
+        }
 
         /*
          * HTTP methods supported by the SCAN-ID API.
@@ -56,6 +52,12 @@ final class Cors
          * Handle browser preflight requests.
          */
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
+            if ($requestOrigin !== '' && !$originAllowed) {
+                http_response_code(403);
+
+                exit;
+            }
+
             http_response_code(204);
 
             exit;
