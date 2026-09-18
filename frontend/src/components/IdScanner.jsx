@@ -152,12 +152,9 @@ function IdScanner({ onCaptured, onClose }) {
         }
 
         /*
-         * The guide box occupies:
-         * 82% of the visible video width
-         * and uses an ID-card aspect ratio of 1.586:1.
-         *
-         * We reproduce that same rectangle in the
-         * original camera image and crop to it.
+         * The guide box uses 82% of the visible camera width.
+         * A Kenyan ID card has approximately a 1.586:1
+         * width-to-height ratio.
          */
 
         const guideWidthRatio = 0.82;
@@ -178,9 +175,6 @@ function IdScanner({ onCaptured, onClose }) {
             (videoHeight - cropHeight) / 2
         );
 
-        /*
-         * Prevent invalid crop dimensions.
-         */
         const safeCropWidth = Math.min(
             cropWidth,
             videoWidth - cropX
@@ -215,9 +209,6 @@ function IdScanner({ onCaptured, onClose }) {
             return;
         }
 
-        /*
-         * Crop the ID from the camera frame.
-         */
         context.drawImage(
             video,
             cropX,
@@ -301,7 +292,6 @@ function IdScanner({ onCaptured, onClose }) {
                     }}
                 />
 
-                {/* ID GUIDE */}
                 <div
                     style={{
                         position: "absolute",
@@ -383,4 +373,4 @@ function IdScanner({ onCaptured, onClose }) {
     );
 }
 
-export default IdScanner;
+export default IdScanner
