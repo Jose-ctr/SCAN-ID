@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
+import IdScanner from "./components/IdScanner";
 
 function App() {
     const [activeAction, setActiveAction] = useState(null);
@@ -18,8 +19,6 @@ function App() {
 
     const [submitted, setSubmitted] = useState(false);
 
-    const cameraInputRef = useRef(null);
-
     const openAction = (action) => {
         setActiveAction(action);
         setSubmitted(false);
@@ -31,22 +30,17 @@ function App() {
         setCapturedImage(null);
     };
 
-    const openCamera = () => {
-        if (cameraInputRef.current) {
-            cameraInputRef.current.click();
-        }
+    const openScanner = () => {
+        setActiveAction("scanner");
+        setSubmitted(false);
     };
 
-    const handleCameraCapture = (event) => {
-        const file = event.target.files?.[0];
+    const handleScannerCapture = ({ blob, imageUrl }) => {
+        setCapturedImage({
+            blob,
+            imageUrl,
+        });
 
-        if (!file) {
-            return;
-        }
-
-        const imageUrl = URL.createObjectURL(file);
-
-        setCapturedImage(imageUrl);
         setActiveAction("scan-result");
     };
 
@@ -113,19 +107,10 @@ function App() {
                         the found ID to begin a secure recovery request.
                     </p>
 
-                    <input
-                        ref={cameraInputRef}
-                        type="file"
-                        accept="image/*"
-                        capture="environment"
-                        onChange={handleCameraCapture}
-                        style={{ display: "none" }}
-                    />
-
                     <button
                         className="primary-button"
                         type="button"
-                        onClick={openCamera}
+                        onClick={openScanner}
                     >
                         Scan Found ID
                     </button>
@@ -234,6 +219,13 @@ function App() {
                     </div>
                 </section>
 
+                {activeAction === "scanner" && (
+                    <IdScanner
+                        onCaptured={handleScannerCapture}
+                        onClose={closeAction}
+                    />
+                )}
+
                 {activeAction === "scan-result" && (
                     <section
                         className="action-message"
@@ -241,9 +233,9 @@ function App() {
                     >
                         <strong>ID Captured</strong>
 
-                        {capturedImage && (
+                        {capturedImage?.imageUrl && (
                             <img
-                                src={capturedImage}
+                                src={capturedImage.imageUrl}
                                 alt="Captured ID"
                                 style={{
                                     width: "100%",
@@ -270,7 +262,7 @@ function App() {
                         <button
                             className="secondary-button"
                             type="button"
-                            onClick={closeAction}
+                            onClick={openScanner}
                         >
                             Retake
                         </button>
