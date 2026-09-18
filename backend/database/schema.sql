@@ -62,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_users_phone
 CREATE INDEX IF NOT EXISTS idx_users_email
     ON users(email);
 
+DROP TRIGGER IF EXISTS users_updated_at ON users;
+
 CREATE TRIGGER users_updated_at
 BEFORE UPDATE ON users
 FOR EACH ROW
@@ -98,6 +100,50 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
 
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at
     ON user_sessions(expires_at);
+
+-- ============================================================
+-- PHONE VERIFICATION OTPs
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS phone_verifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    user_id UUID
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+
+    phone VARCHAR(20) NOT NULL,
+
+    otp_hash TEXT NOT NULL,
+
+    attempts INTEGER NOT NULL DEFAULT 0
+        CHECK (attempts >= 0),
+
+    max_attempts INTEGER NOT NULL DEFAULT 5
+        CHECK (max_attempts > 0),
+
+    expires_at TIMESTAMPTZ NOT NULL,
+
+    verified_at TIMESTAMPTZ,
+
+    used_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_phone_verifications_phone
+    ON phone_verifications(phone);
+
+CREATE INDEX IF NOT EXISTS idx_phone_verifications_user
+    ON phone_verifications(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_phone_verifications_expires
+    ON phone_verifications(expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_phone_verifications_active
+    ON phone_verifications(phone, expires_at)
+    WHERE verified_at IS NULL
+      AND used_at IS NULL;
 
 -- ============================================================
 -- FOUND IDS
@@ -150,6 +196,8 @@ CREATE INDEX IF NOT EXISTS idx_found_ids_status
 
 CREATE INDEX IF NOT EXISTS idx_found_ids_finder
     ON found_ids(finder_user_id);
+
+DROP TRIGGER IF EXISTS found_ids_updated_at ON found_ids;
 
 CREATE TRIGGER found_ids_updated_at
 BEFORE UPDATE ON found_ids
@@ -210,6 +258,9 @@ CREATE INDEX IF NOT EXISTS idx_recovery_requests_owner
 
 CREATE INDEX IF NOT EXISTS idx_recovery_requests_status
     ON recovery_requests(status);
+
+DROP TRIGGER IF EXISTS recovery_requests_updated_at
+ON recovery_requests;
 
 CREATE TRIGGER recovery_requests_updated_at
 BEFORE UPDATE ON recovery_requests
@@ -315,6 +366,9 @@ CREATE INDEX IF NOT EXISTS idx_recovery_payments_status
 CREATE INDEX IF NOT EXISTS idx_recovery_payments_checkout
     ON recovery_payments(checkout_request_id);
 
+DROP TRIGGER IF EXISTS recovery_payments_updated_at
+ON recovery_payments;
+
 CREATE TRIGGER recovery_payments_updated_at
 BEFORE UPDATE ON recovery_payments
 FOR EACH ROW
@@ -358,6 +412,9 @@ CREATE TABLE IF NOT EXISTS handovers (
 
 CREATE INDEX IF NOT EXISTS idx_handovers_status
     ON handovers(status);
+
+DROP TRIGGER IF EXISTS handovers_updated_at
+ON handovers;
 
 CREATE TRIGGER handovers_updated_at
 BEFORE UPDATE ON handovers
@@ -419,6 +476,16 @@ INSERT INTO schema_versions (
 VALUES (
     1,
     'Initial SCAN-ID identity recovery, notification, payment, handover and audit schema'
+)
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO schema_versions (
+    version,
+    description
+)
+VALUES (
+    2,
+    'Add secure phone verification OTP storage'
 )
 ON CONFLICT (version) DO NOTHING;
 
