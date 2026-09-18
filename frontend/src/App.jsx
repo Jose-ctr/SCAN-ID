@@ -1,18 +1,24 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 function App() {
     const [activeAction, setActiveAction] = useState(null);
+    const [capturedImage, setCapturedImage] = useState(null);
+
     const [foundForm, setFoundForm] = useState({
         idType: "",
         idNumber: "",
         location: "",
         phone: "",
     });
+
     const [recoveryForm, setRecoveryForm] = useState({
         reference: "",
         phone: "",
     });
+
     const [submitted, setSubmitted] = useState(false);
+
+    const cameraInputRef = useRef(null);
 
     const openAction = (action) => {
         setActiveAction(action);
@@ -22,6 +28,26 @@ function App() {
     const closeAction = () => {
         setActiveAction(null);
         setSubmitted(false);
+        setCapturedImage(null);
+    };
+
+    const openCamera = () => {
+        if (cameraInputRef.current) {
+            cameraInputRef.current.click();
+        }
+    };
+
+    const handleCameraCapture = (event) => {
+        const file = event.target.files?.[0];
+
+        if (!file) {
+            return;
+        }
+
+        const imageUrl = URL.createObjectURL(file);
+
+        setCapturedImage(imageUrl);
+        setActiveAction("scan-result");
     };
 
     const handleFoundChange = (event) => {
@@ -83,14 +109,23 @@ function App() {
                     <h1>Found an ID?</h1>
 
                     <p>
-                        Help return it to its owner. Start a secure
-                        recovery request below.
+                        Help return it to its owner. Scan or capture
+                        the found ID to begin a secure recovery request.
                     </p>
+
+                    <input
+                        ref={cameraInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={handleCameraCapture}
+                        style={{ display: "none" }}
+                    />
 
                     <button
                         className="primary-button"
                         type="button"
-                        onClick={() => openAction("scan")}
+                        onClick={openCamera}
                     >
                         Scan Found ID
                     </button>
@@ -157,7 +192,7 @@ function App() {
                                 <strong>Scan</strong>
 
                                 <p>
-                                    Scan or enter the found ID details.
+                                    Scan or capture the found ID.
                                 </p>
                             </div>
                         </div>
@@ -199,17 +234,29 @@ function App() {
                     </div>
                 </section>
 
-                {activeAction === "scan" && (
+                {activeAction === "scan-result" && (
                     <section
                         className="action-message"
                         aria-live="polite"
                     >
-                        <strong>Scan Found ID</strong>
+                        <strong>ID Captured</strong>
+
+                        {capturedImage && (
+                            <img
+                                src={capturedImage}
+                                alt="Captured ID"
+                                style={{
+                                    width: "100%",
+                                    borderRadius: "12px",
+                                    marginTop: "12px",
+                                }}
+                            />
+                        )}
 
                         <p>
-                            Camera scanning will be connected in the
-                            next stage. For now, you can report the
-                            found ID manually.
+                            The ID image was captured successfully.
+                            The secure verification and report process
+                            will be connected next.
                         </p>
 
                         <button
@@ -217,7 +264,7 @@ function App() {
                             type="button"
                             onClick={() => openAction("found")}
                         >
-                            Report Manually
+                            Continue Report
                         </button>
 
                         <button
@@ -225,7 +272,7 @@ function App() {
                             type="button"
                             onClick={closeAction}
                         >
-                            Close
+                            Retake
                         </button>
                     </section>
                 )}
@@ -271,18 +318,23 @@ function App() {
                                     <option value="">
                                         Select ID type
                                     </option>
+
                                     <option value="national-id">
                                         National ID
                                     </option>
+
                                     <option value="passport">
                                         Passport
                                     </option>
+
                                     <option value="driving-license">
                                         Driving Licence
                                     </option>
+
                                     <option value="student-id">
                                         Student ID
                                     </option>
+
                                     <option value="other">
                                         Other
                                     </option>
