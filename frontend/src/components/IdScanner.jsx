@@ -6,32 +6,58 @@ function IdScanner({ onCaptured, onClose }) {
 
     const [error, setError] = useState("");
     const [starting, setStarting] = useState(true);
+    const [cameraReady, setCameraReady] = useState(false);
 
     useEffect(() => {
         let mounted = true;
 
         const startCamera = async () => {
             try {
+                setStarting(true);
+                setError("");
+
                 if (!navigator.mediaDevices?.getUserMedia) {
                     throw new Error(
                         "Camera access is not supported by this browser."
                     );
                 }
 
-                const stream =
-                    await navigator.mediaDevices.getUserMedia({
-                        video: {
-                            facingMode: {
-                                ideal: "environment",
+                let stream;
+
+                try {
+                    stream =
+                        await navigator.mediaDevices.getUserMedia({
+                            video: {
+                                facingMode: {
+                                    ideal: "environment",
+                                },
+                                width: {
+                                    ideal: 1920,
+                                },
+                                height: {
+                                    ideal: 1080,
+                                },
                             },
-                        },
-                        audio: false,
-                    });
+                            audio: false,
+                        });
+                } catch (firstError) {
+                    console.warn(
+                        "Preferred camera settings failed. Retrying with basic camera.",
+                        firstError
+                    );
+
+                    stream =
+                        await navigator.mediaDevices.getUserMedia({
+                            video: true,
+                            audio: false,
+                        });
+                }
 
                 if (!mounted) {
-                    stream.getTracks().forEach((track) =>
-                        track.stop()
-                    );
+                    stream
+                        .getTracks()
+                        .forEach((track) => track.stop());
+
                     return;
                 }
 
@@ -39,16 +65,48 @@ function IdScanner({ onCaptured, onClose }) {
 
                 if (videoRef.current) {
                     videoRef.current.srcObject = stream;
+
+                    try {
+                        await videoRef.current.play();
+                    } catch (playError) {
+                        console.warn(
+                            "Camera autoplay was blocked.",
+                            playError
+                        );
+                    }
                 }
 
                 setStarting(false);
+                setCameraReady(true);
             } catch (cameraError) {
                 console.error(cameraError);
 
-                if (mounted) {
-                    setStarting(false);
+                if (!mounted) {
+                    return;
+                }
+
+                setStarting(false);
+                setCameraReady(false);
+
+                if (cameraError?.name === "NotAllowedError") {
                     setError(
-                        "Camera access was denied or is unavailable. Please allow camera permission and try again."
+                        "Camera permission was denied. Allow camera access and try again."
+                    );
+                } else if (
+                    cameraError?.name === "NotFoundError"
+                ) {
+                    setError(
+                        "No camera was found on this device."
+                    );
+                } else if (
+                    cameraError?.name === "NotReadableError"
+                ) {
+                    setError(
+                        "The camera is being used by another app. Close other camera apps and try again."
+                    );
+                } else {
+                    setError(
+                        "Camera access was denied or is unavailable."
                     );
                 }
             }
@@ -66,6 +124,10 @@ function IdScanner({ onCaptured, onClose }) {
 
                 streamRef.current = null;
             }
+
+            if (videoRef.current) {
+                videoRef.current.srcObject = null;
+            }
         };
     }, []);
 
@@ -79,42 +141,115 @@ function IdScanner({ onCaptured, onClose }) {
             return;
         }
 
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+
+        if (!videoWidth || !videoHeight) {
+            setError(
+                "Camera image is not ready yet. Please try again."
+            );
+            return;
+        }
+
+        /*
+         * The guide box occupies:
+         * 82% of the visible video width
+         * and uses an ID-card aspect ratio of 1.586:1.
+         *
+         * We reproduce that same rectangle in the
+         * original camera image and crop to it.
+         */
+
+        const guideWidthRatio = 0.82;
+
+        const cropWidth = Math.round(
+            videoWidth * guideWidthRatio
+        );
+
+        const cropHeight = Math.round(
+            cropWidth / 1.586
+        );
+
+        const cropX = Math.round(
+            (videoWidth - cropWidth) / 2
+        );
+
+        const cropY = Math.round(
+            (videoHeight - cropHeight) / 2
+        );
+
+        /*
+         * Prevent invalid crop dimensions.
+         */
+        const safeCropWidth = Math.min(
+            cropWidth,
+            videoWidth - cropX
+        );
+
+        const safeCropHeight = Math.min(
+            cropHeight,
+            videoHeight - cropY
+        );
+
+        if (
+            safeCropWidth <= 0 ||
+            safeCropHeight <= 0
+        ) {
+            setError(
+                "Unable to calculate the ID crop. Please try again."
+            );
+            return;
+        }
+
         const canvas = document.createElement("canvas");
 
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        canvas.width = safeCropWidth;
+        canvas.height = safeCropHeight;
 
         const context = canvas.getContext("2d");
 
         if (!context) {
-            setError("Unable to capture the camera image.");
+            setError(
+                "Unable to create the cropped image."
+            );
             return;
         }
 
+        /*
+         * Crop the ID from the camera frame.
+         */
         context.drawImage(
             video,
+            cropX,
+            cropY,
+            safeCropWidth,
+            safeCropHeight,
             0,
             0,
-            canvas.width,
-            canvas.height
+            safeCropWidth,
+            safeCropHeight
         );
 
         canvas.toBlob(
             (blob) => {
                 if (!blob) {
-                    setError("Unable to create the captured image.");
+                    setError(
+                        "Unable to create the cropped image."
+                    );
                     return;
                 }
 
-                const imageUrl = URL.createObjectURL(blob);
+                const imageUrl =
+                    URL.createObjectURL(blob);
 
                 onCaptured({
                     blob,
                     imageUrl,
+                    cropped: true,
                 });
             },
             "image/jpeg",
-            0.9
+            0.92
         );
     };
 
@@ -123,8 +258,8 @@ function IdScanner({ onCaptured, onClose }) {
             <strong>Scan Found ID</strong>
 
             <p>
-                Position the found ID inside the camera view.
-                Make sure the document is clear and readable.
+                Fit the entire ID inside the guide box.
+                Keep the phone steady and avoid glare.
             </p>
 
             {starting && (
@@ -144,11 +279,13 @@ function IdScanner({ onCaptured, onClose }) {
 
             <div
                 style={{
+                    position: "relative",
                     width: "100%",
                     overflow: "hidden",
                     borderRadius: "16px",
                     background: "#000",
                     marginTop: "16px",
+                    aspectRatio: "16 / 10",
                 }}
             >
                 <video
@@ -159,19 +296,80 @@ function IdScanner({ onCaptured, onClose }) {
                     style={{
                         display: "block",
                         width: "100%",
-                        minHeight: "240px",
+                        height: "100%",
                         objectFit: "cover",
                     }}
                 />
+
+                {/* ID GUIDE */}
+                <div
+                    style={{
+                        position: "absolute",
+                        inset: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        pointerEvents: "none",
+                    }}
+                >
+                    <div
+                        style={{
+                            width: "82%",
+                            aspectRatio: "1.586 / 1",
+                            border:
+                                "3px solid #A6FF80",
+                            borderRadius: "14px",
+                            boxShadow:
+                                "0 0 0 9999px rgba(0,0,0,0.32)",
+                            position: "relative",
+                        }}
+                    >
+                        <div
+                            style={{
+                                position: "absolute",
+                                left: "50%",
+                                bottom: "-38px",
+                                transform:
+                                    "translateX(-50%)",
+                                background:
+                                    "rgba(0,0,0,0.75)",
+                                color: "#fff",
+                                padding:
+                                    "7px 12px",
+                                borderRadius: "8px",
+                                fontSize: "13px",
+                                whiteSpace:
+                                    "nowrap",
+                            }}
+                        >
+                            Fit ID inside the box
+                        </div>
+                    </div>
+                </div>
             </div>
+
+            <p
+                style={{
+                    fontSize: "13px",
+                    opacity: 0.75,
+                    marginTop: "14px",
+                }}
+            >
+                The captured image will automatically
+                be cropped to the guide box.
+            </p>
 
             <button
                 className="primary-button"
                 type="button"
                 onClick={captureImage}
-                disabled={starting || Boolean(error)}
+                disabled={
+                    starting ||
+                    !cameraReady ||
+                    Boolean(error)
+                }
             >
-                Capture ID
+                Capture & Crop ID
             </button>
 
             <button
