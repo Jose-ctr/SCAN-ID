@@ -25,6 +25,14 @@ final class App
     }
 
     /**
+     * Determine whether the application is running in production.
+     */
+    public static function isProduction(): bool
+    {
+        return self::environment() === 'production';
+    }
+
+    /**
      * Determine whether debug mode is enabled.
      */
     public static function debug(): bool
@@ -55,7 +63,7 @@ final class App
     }
 
     /**
-     * Get the configured recovery fee.
+     * Get the configured recovery fee in Kenyan shillings.
      */
     public static function recoveryFee(): int
     {
