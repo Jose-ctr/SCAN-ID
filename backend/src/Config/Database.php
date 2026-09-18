@@ -41,6 +41,23 @@ final class Database
             );
         }
 
+        if (
+            filter_var(
+                $port,
+                FILTER_VALIDATE_INT,
+                [
+                    'options' => [
+                        'min_range' => 1,
+                        'max_range' => 65535,
+                    ],
+                ]
+            ) === false
+        ) {
+            throw new RuntimeException(
+                'Invalid database port configuration.'
+            );
+        }
+
         $dsn = sprintf(
             'pgsql:host=%s;port=%s;dbname=%s',
             $host,
