@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use ScanId\Config\Database;
 use ScanId\Controllers\AuthController;
+use ScanId\Controllers\PhoneVerificationController;
 use ScanId\Http\AuthMiddleware;
 use ScanId\Http\Response;
 use ScanId\Http\Router;
@@ -66,6 +67,30 @@ $router->get(
 $router->post(
     '/api/auth/logout',
     [AuthController::class, 'logout'],
+    [AuthMiddleware::class]
+);
+
+/*
+ * ============================================================
+ * PHONE VERIFICATION — PROTECTED
+ * ============================================================
+ */
+
+$router->post(
+    '/api/phone/verify/send',
+    [PhoneVerificationController::class, 'send'],
+    [AuthMiddleware::class]
+);
+
+$router->post(
+    '/api/phone/verify',
+    [PhoneVerificationController::class, 'verify'],
+    [AuthMiddleware::class]
+);
+
+$router->get(
+    '/api/phone/verify/status',
+    [PhoneVerificationController::class, 'status'],
     [AuthMiddleware::class]
 );
 
