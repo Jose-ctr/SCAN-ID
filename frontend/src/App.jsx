@@ -1,73 +1,25 @@
 import { useState } from "react";
-import IdScanner from "./components/IdScanner";
 
 function App() {
-    const [activeAction, setActiveAction] = useState(null);
-    const [capturedImage, setCapturedImage] = useState(null);
-
-    const [foundForm, setFoundForm] = useState({
-        idType: "",
+    const [form, setForm] = useState({
+        idType: "national-id",
         idNumber: "",
-        location: "",
-        phone: "",
-    });
-
-    const [recoveryForm, setRecoveryForm] = useState({
-        reference: "",
-        phone: "",
+        locationFound: "",
+        reporterPhone: "",
     });
 
     const [submitted, setSubmitted] = useState(false);
 
-    const openAction = (action) => {
-        setActiveAction(action);
-        setSubmitted(false);
-    };
-
-    const closeAction = () => {
-        setActiveAction(null);
-        setSubmitted(false);
-        setCapturedImage(null);
-    };
-
-    const openScanner = () => {
-        setActiveAction("scanner");
-        setSubmitted(false);
-    };
-
-    const handleScannerCapture = ({ blob, imageUrl }) => {
-        setCapturedImage({
-            blob,
-            imageUrl,
-        });
-
-        setActiveAction("scan-result");
-    };
-
-    const handleFoundChange = (event) => {
+    const handleChange = (event) => {
         const { name, value } = event.target;
 
-        setFoundForm((current) => ({
+        setForm((current) => ({
             ...current,
             [name]: value,
         }));
     };
 
-    const handleRecoveryChange = (event) => {
-        const { name, value } = event.target;
-
-        setRecoveryForm((current) => ({
-            ...current,
-            [name]: value,
-        }));
-    };
-
-    const handleFoundSubmit = (event) => {
-        event.preventDefault();
-        setSubmitted(true);
-    };
-
-    const handleRecoverySubmit = (event) => {
+    const handleSubmit = (event) => {
         event.preventDefault();
         setSubmitted(true);
     };
@@ -75,103 +27,45 @@ function App() {
     return (
         <div className="app-shell">
             <header className="app-header">
-                <div>
-                    <div className="brand">SCAN-ID</div>
+                <div className="brand-area">
+                    <div className="brand-row">
+                        <span className="brand">SCAN-ID</span>
 
-                    <div className="brand-subtitle">
-                        Lost ID Recovery Network Kenya
+                        <span
+                            className="status-badge"
+                            aria-label="SCAN-ID secure"
+                        >
+                            🛡 Secure
+                        </span>
+
+                        <span
+                            className="kenya-flag"
+                            aria-label="Kenya"
+                            role="img"
+                        >
+                            🇰🇪
+                        </span>
                     </div>
-                </div>
 
-                <div
-                    className="status-badge"
-                    aria-label="SCAN-ID security status"
-                >
-                    Secure
+                    <p className="brand-subtitle">
+                        Lost ID Recovery Network Kenya
+                    </p>
                 </div>
             </header>
 
             <main className="app-content">
-                <section className="hero-card">
-                    <div
-                        className="hero-icon"
-                        aria-hidden="true"
-                    >
-                        ID
-                    </div>
-
-                    <h1>Found an ID?</h1>
-
-                    <p>
-                        Help return it to its owner. Scan or capture
-                        the found ID to begin a secure recovery request.
-                    </p>
-
-                    <button
-                        className="primary-button"
-                        type="button"
-                        onClick={openScanner}
-                    >
-                        Scan Found ID
-                    </button>
-                </section>
-
-                <section
-                    className="info-grid"
-                    aria-label="SCAN-ID actions"
-                >
-                    <button
-                        className="info-card"
-                        type="button"
-                        onClick={() => openAction("found")}
-                    >
-                        <span
-                            className="info-icon"
-                            aria-hidden="true"
-                        >
-                            +
-                        </span>
-
-                        <strong>Report Found ID</strong>
-
-                        <span>
-                            Enter details manually
-                        </span>
-                    </button>
-
-                    <button
-                        className="info-card"
-                        type="button"
-                        onClick={() => openAction("recovery")}
-                    >
-                        <span
-                            className="info-icon"
-                            aria-hidden="true"
-                        >
-                            ✓
-                        </span>
-
-                        <strong>Recover My ID</strong>
-
-                        <span>
-                            Check a recovery request
-                        </span>
-                    </button>
-                </section>
-
                 <section className="how-it-works">
                     <div className="section-heading">
-                        <h2>How SCAN-ID works</h2>
+                        <span className="section-label">
+                            HOW IT WORKS
+                        </span>
+
+                        <h1>Three simple steps</h1>
                     </div>
 
                     <div className="steps">
-                        <div className="step">
-                            <span
-                                className="step-number"
-                                aria-hidden="true"
-                            >
-                                1
-                            </span>
+                        <article className="step-card">
+                            <span className="step-number">1</span>
 
                             <div>
                                 <strong>Scan</strong>
@@ -180,122 +74,72 @@ function App() {
                                     Scan or capture the found ID.
                                 </p>
                             </div>
-                        </div>
+                        </article>
 
-                        <div className="step">
-                            <span
-                                className="step-number"
-                                aria-hidden="true"
-                            >
-                                2
-                            </span>
+                        <article className="step-card">
+                            <span className="step-number">2</span>
 
                             <div>
                                 <strong>Notify</strong>
 
                                 <p>
-                                    The verified owner receives an SMS.
+                                    Notify the verified owner securely.
                                 </p>
                             </div>
-                        </div>
+                        </article>
 
-                        <div className="step">
-                            <span
-                                className="step-number"
-                                aria-hidden="true"
-                            >
-                                3
-                            </span>
+                        <article className="step-card">
+                            <span className="step-number">3</span>
 
                             <div>
                                 <strong>Recover</strong>
 
                                 <p>
-                                    Complete the secure recovery process
-                                    and arrange a safe handover.
+                                    Arrange a safe handover.
                                 </p>
                             </div>
-                        </div>
+                        </article>
                     </div>
                 </section>
 
-                {activeAction === "scanner" && (
-                    <IdScanner
-                        onCaptured={handleScannerCapture}
-                        onClose={closeAction}
-                    />
-                )}
+                <section className="report-card">
+                    <div className="section-heading">
+                        <span className="section-label">
+                            REPORT FOUND ID
+                        </span>
 
-                {activeAction === "scan-result" && (
-                    <section
-                        className="action-message"
-                        aria-live="polite"
-                    >
-                        <strong>ID Captured</strong>
-
-                        {capturedImage?.imageUrl && (
-                            <img
-                                src={capturedImage.imageUrl}
-                                alt="Captured ID"
-                                style={{
-                                    width: "100%",
-                                    borderRadius: "12px",
-                                    marginTop: "12px",
-                                }}
-                            />
-                        )}
+                        <h2>Help return it to its owner</h2>
 
                         <p>
-                            The ID image was captured successfully.
-                            The secure verification and report process
-                            will be connected next.
+                            Enter the details below to prepare a
+                            secure found-ID report.
                         </p>
+                    </div>
 
-                        <button
-                            className="primary-button"
-                            type="button"
-                            onClick={() => openAction("found")}
+                    {submitted ? (
+                        <div
+                            className="success-message"
+                            role="status"
+                            aria-live="polite"
                         >
-                            Continue Report
-                        </button>
+                            <strong>Report prepared</strong>
 
-                        <button
-                            className="secondary-button"
-                            type="button"
-                            onClick={openScanner}
-                        >
-                            Retake
-                        </button>
-                    </section>
-                )}
+                            <p>
+                                Your found-ID report is ready for
+                                secure backend submission.
+                            </p>
 
-                {activeAction === "found" && (
-                    <section className="action-message">
-                        <strong>Report Found ID</strong>
-
-                        {submitted ? (
-                            <>
-                                <p>
-                                    Your found-ID report has been
-                                    prepared successfully.
-                                </p>
-
-                                <p>
-                                    Backend submission and SMS
-                                    notification will be connected
-                                    in the next development stage.
-                                </p>
-
-                                <button
-                                    className="secondary-button"
-                                    type="button"
-                                    onClick={closeAction}
-                                >
-                                    Done
-                                </button>
-                            </>
-                        ) : (
-                            <form onSubmit={handleFoundSubmit}>
+                            <button
+                                className="secondary-button"
+                                type="button"
+                                onClick={() => setSubmitted(false)}
+                            >
+                                Edit Report
+                            </button>
+                        </div>
+                    ) : (
+                        <form onSubmit={handleSubmit}>
+                            <div className="form-field">
                                 <label htmlFor="idType">
                                     ID type
                                 </label>
@@ -303,14 +147,10 @@ function App() {
                                 <select
                                     id="idType"
                                     name="idType"
-                                    value={foundForm.idType}
-                                    onChange={handleFoundChange}
+                                    value={form.idType}
+                                    onChange={handleChange}
                                     required
                                 >
-                                    <option value="">
-                                        Select ID type
-                                    </option>
-
                                     <option value="national-id">
                                         National ID
                                     </option>
@@ -331,7 +171,9 @@ function App() {
                                         Other
                                     </option>
                                 </select>
+                            </div>
 
+                            <div className="form-field">
                                 <label htmlFor="idNumber">
                                     ID number
                                 </label>
@@ -340,142 +182,68 @@ function App() {
                                     id="idNumber"
                                     name="idNumber"
                                     type="text"
-                                    value={foundForm.idNumber}
-                                    onChange={handleFoundChange}
+                                    value={form.idNumber}
+                                    onChange={handleChange}
                                     placeholder="Enter ID number"
                                     autoComplete="off"
                                     required
                                 />
+                            </div>
 
-                                <label htmlFor="location">
-                                    Where was it found?
+                            <div className="form-field">
+                                <label htmlFor="locationFound">
+                                    Where was it found
                                 </label>
 
                                 <input
-                                    id="location"
-                                    name="location"
+                                    id="locationFound"
+                                    name="locationFound"
                                     type="text"
-                                    value={foundForm.location}
-                                    onChange={handleFoundChange}
+                                    value={form.locationFound}
+                                    onChange={handleChange}
                                     placeholder="e.g. Mariakani Stage"
                                     required
                                 />
+                            </div>
 
-                                <label htmlFor="phone">
+                            <div className="form-field">
+                                <label htmlFor="reporterPhone">
                                     Your phone number
                                 </label>
 
                                 <input
-                                    id="phone"
-                                    name="phone"
+                                    id="reporterPhone"
+                                    name="reporterPhone"
                                     type="tel"
-                                    value={foundForm.phone}
-                                    onChange={handleFoundChange}
-                                    placeholder="e.g. 07XXXXXXXX"
+                                    value={form.reporterPhone}
+                                    onChange={handleChange}
+                                    placeholder="+254 7__ ______"
                                     autoComplete="tel"
+                                    inputMode="tel"
                                     required
                                 />
+                            </div>
 
-                                <button
-                                    className="primary-button"
-                                    type="submit"
-                                >
-                                    Prepare Report
-                                </button>
-
-                                <button
-                                    className="secondary-button"
-                                    type="button"
-                                    onClick={closeAction}
-                                >
-                                    Cancel
-                                </button>
-                            </form>
-                        )}
-                    </section>
-                )}
-
-                {activeAction === "recovery" && (
-                    <section className="action-message">
-                        <strong>Recover My ID</strong>
-
-                        {submitted ? (
-                            <>
-                                <p>
-                                    Your recovery lookup request has
-                                    been prepared.
-                                </p>
-
-                                <p>
-                                    Live recovery-status lookup will
-                                    be connected to the backend next.
-                                </p>
-
-                                <button
-                                    className="secondary-button"
-                                    type="button"
-                                    onClick={closeAction}
-                                >
-                                    Done
-                                </button>
-                            </>
-                        ) : (
-                            <form onSubmit={handleRecoverySubmit}>
-                                <label htmlFor="reference">
-                                    Recovery reference
-                                </label>
-
-                                <input
-                                    id="reference"
-                                    name="reference"
-                                    type="text"
-                                    value={recoveryForm.reference}
-                                    onChange={handleRecoveryChange}
-                                    placeholder="Enter recovery reference"
-                                    autoComplete="off"
-                                    required
-                                />
-
-                                <label htmlFor="recovery-phone">
-                                    Phone number
-                                </label>
-
-                                <input
-                                    id="recovery-phone"
-                                    name="phone"
-                                    type="tel"
-                                    value={recoveryForm.phone}
-                                    onChange={handleRecoveryChange}
-                                    placeholder="e.g. 07XXXXXXXX"
-                                    autoComplete="tel"
-                                    required
-                                />
-
-                                <button
-                                    className="primary-button"
-                                    type="submit"
-                                >
-                                    Check Status
-                                </button>
-
-                                <button
-                                    className="secondary-button"
-                                    type="button"
-                                    onClick={closeAction}
-                                >
-                                    Cancel
-                                </button>
-                            </form>
-                        )}
-                    </section>
-                )}
+                            <button
+                                className="primary-button"
+                                type="submit"
+                            >
+                                Prepare Report
+                            </button>
+                        </form>
+                    )}
+                </section>
             </main>
 
             <footer className="app-footer">
-                <span>SCAN-ID</span>
+                <span>🔒 Encrypted</span>
 
                 <span>
-                    Safe • Private • Kenya
+                    Data Protection Act
+                </span>
+
+                <span>
+                    Shared only with verified owner
                 </span>
             </footer>
         </div>
