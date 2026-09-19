@@ -1,6 +1,13 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 function App() {
+    const videoRef = useRef(null);
+    const canvasRef = useRef(null);
+
+    const [cameraOpen, setCameraOpen] = useState(false);
+    const [cameraError, setCameraError] = useState("");
+    const [capturedImage, setCapturedImage] = useState("");
+
     const [form, setForm] = useState({
         idType: "national-id",
         idNumber: "",
@@ -19,17 +26,134 @@ function App() {
         }));
     };
 
+    const startCamera = async () => {
+        setCameraError("");
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+            setCameraError(
+                "Camera access is not supported by this browser."
+            );
+            return;
+        }
+
+        try {
+            const stream =
+                await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: {
+                            ideal: "environment",
+                        },
+                    },
+                    audio: false,
+                });
+
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                await videoRef.current.play();
+            }
+
+            setCameraOpen(true);
+        } catch (error) {
+            console.error("Camera error:", error);
+
+            setCameraError(
+                "Camera access was denied or is unavailable. Please allow camera permission and try again."
+            );
+        }
+    };
+
+    const stopCamera = () => {
+        const video = videoRef.current;
+
+        if (video?.srcObject) {
+            const tracks = video.srcObject.getTracks();
+
+            tracks.forEach((track) => {
+                track.stop();
+            });
+
+            video.srcObject = null;
+        }
+
+        setCameraOpen(false);
+    };
+
+    const captureImage = () => {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+
+        if (!video || !canvas) {
+            return;
+        }
+
+        if (
+            video.videoWidth === 0 ||
+            video.videoHeight === 0
+        ) {
+            setCameraError(
+                "Camera is not ready yet. Please wait a moment and try again."
+            );
+            return;
+        }
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+            setCameraError(
+                "Unable to capture the camera image."
+            );
+            return;
+        }
+
+        context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        const image = canvas.toDataURL(
+            "image/jpeg",
+            0.85
+        );
+
+        setCapturedImage(image);
+        stopCamera();
+    };
+
+    const clearCapturedImage = () => {
+        setCapturedImage("");
+    };
+
     const handleSubmit = (event) => {
         event.preventDefault();
         setSubmitted(true);
     };
+
+    useEffect(() => {
+        return () => {
+            const video = videoRef.current;
+
+            if (video?.srcObject) {
+                video.srcObject
+                    .getTracks()
+                    .forEach((track) => track.stop());
+            }
+        };
+    }, []);
 
     return (
         <div className="app-shell">
             <header className="app-header">
                 <div className="brand-area">
                     <div className="brand-row">
-                        <span className="brand">SCAN-ID</span>
+                        <span className="brand">
+                            SCAN-ID
+                        </span>
 
                         <span
                             className="status-badge"
@@ -65,7 +189,9 @@ function App() {
 
                     <div className="steps">
                         <article className="step-card">
-                            <span className="step-number">1</span>
+                            <span className="step-number">
+                                1
+                            </span>
 
                             <div>
                                 <strong>Scan</strong>
@@ -77,7 +203,9 @@ function App() {
                         </article>
 
                         <article className="step-card">
-                            <span className="step-number">2</span>
+                            <span className="step-number">
+                                2
+                            </span>
 
                             <div>
                                 <strong>Notify</strong>
@@ -89,7 +217,9 @@ function App() {
                         </article>
 
                         <article className="step-card">
-                            <span className="step-number">3</span>
+                            <span className="step-number">
+                                3
+                            </span>
 
                             <div>
                                 <strong>Recover</strong>
@@ -102,17 +232,108 @@ function App() {
                     </div>
                 </section>
 
+                <section className="scan-card">
+                    <div className="section-heading">
+                        <span className="section-label">
+                            SCAN FOUND ID
+                        </span>
+
+                        <h2>
+                            Use your camera
+                        </h2>
+
+                        <p>
+                            Capture the found ID securely.
+                            Do not share unnecessary information.
+                        </p>
+                    </div>
+
+                    {!cameraOpen && !capturedImage && (
+                        <button
+                            className="primary-button"
+                            type="button"
+                            onClick={startCamera}
+                        >
+                            📷 Open Camera
+                        </button>
+                    )}
+
+                    {cameraOpen && (
+                        <div className="camera-area">
+                            <video
+                                ref={videoRef}
+                                className="camera-preview"
+                                autoPlay
+                                playsInline
+                                muted
+                            />
+
+                            <div className="camera-actions">
+                                <button
+                                    className="primary-button"
+                                    type="button"
+                                    onClick={captureImage}
+                                >
+                                    Capture ID
+                                </button>
+
+                                <button
+                                    className="secondary-button"
+                                    type="button"
+                                    onClick={stopCamera}
+                                >
+                                    Stop Camera
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {capturedImage && (
+                        <div className="captured-area">
+                            <img
+                                className="captured-image"
+                                src={capturedImage}
+                                alt="Captured found ID"
+                            />
+
+                            <button
+                                className="secondary-button"
+                                type="button"
+                                onClick={clearCapturedImage}
+                            >
+                                Retake Photo
+                            </button>
+                        </div>
+                    )}
+
+                    {cameraError && (
+                        <div
+                            className="camera-error"
+                            role="alert"
+                        >
+                            {cameraError}
+                        </div>
+                    )}
+
+                    <canvas
+                        ref={canvasRef}
+                        className="hidden-canvas"
+                    />
+                </section>
+
                 <section className="report-card">
                     <div className="section-heading">
                         <span className="section-label">
                             REPORT FOUND ID
                         </span>
 
-                        <h2>Help return it to its owner</h2>
+                        <h2>
+                            Help return it to its owner
+                        </h2>
 
                         <p>
-                            Enter the details below to prepare a
-                            secure found-ID report.
+                            Enter the details below to prepare
+                            a secure found-ID report.
                         </p>
                     </div>
 
@@ -122,17 +343,21 @@ function App() {
                             role="status"
                             aria-live="polite"
                         >
-                            <strong>Report prepared</strong>
+                            <strong>
+                                Report prepared
+                            </strong>
 
                             <p>
-                                Your found-ID report is ready for
-                                secure backend submission.
+                                Your found-ID report is ready
+                                for secure backend submission.
                             </p>
 
                             <button
                                 className="secondary-button"
                                 type="button"
-                                onClick={() => setSubmitted(false)}
+                                onClick={() =>
+                                    setSubmitted(false)
+                                }
                             >
                                 Edit Report
                             </button>
