@@ -105,11 +105,13 @@ button {
 }
 
 .how-it-works,
+.scan-card,
 .report-card {
     width: 100%;
 }
 
-.how-it-works {
+.how-it-works,
+.scan-card {
     margin-bottom: 28px;
 }
 
@@ -186,11 +188,57 @@ button {
     line-height: 1.4;
 }
 
+.scan-card,
 .report-card {
     padding: 20px 18px;
     border: 1px solid rgba(166, 255, 128, 0.28);
     border-radius: 20px;
     background: #151b19;
+}
+
+.camera-area,
+.captured-area {
+    width: 100%;
+}
+
+.camera-preview,
+.captured-image {
+    display: block;
+    width: 100%;
+    max-height: 420px;
+    object-fit: cover;
+    border: 1px solid rgba(166, 255, 128, 0.25);
+    border-radius: 16px;
+    background: #050807;
+}
+
+.camera-preview {
+    aspect-ratio: 4 / 3;
+}
+
+.captured-image {
+    aspect-ratio: 4 / 3;
+}
+
+.camera-actions {
+    display: grid;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.camera-error {
+    margin-top: 14px;
+    padding: 13px 14px;
+    border: 1px solid #704646;
+    border-radius: 13px;
+    background: #211616;
+    color: #ffb5b5;
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+.hidden-canvas {
+    display: none;
 }
 
 .form-field {
@@ -319,7 +367,12 @@ button {
         min-height: 150px;
     }
 
+    .scan-card,
     .report-card {
         padding: 28px;
+    }
+
+    .camera-actions {
+        grid-template-columns: 1fr 1fr;
     }
 }
