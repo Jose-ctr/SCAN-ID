@@ -15,7 +15,7 @@ final class AuthController
     /**
      * Register a new SCAN-ID account.
      *
-     * @param array<string, string> $params
+     * @param array<string, mixed> $params
      */
     public static function register(
         array $params = []
@@ -23,9 +23,7 @@ final class AuthController
         $data = Request::json();
 
         try {
-            $user = AuthService::register(
-                $data
-            );
+            $user = AuthService::register($data);
 
             Response::success([
                 'user' => $user,
@@ -42,7 +40,7 @@ final class AuthController
     /**
      * Authenticate an existing user.
      *
-     * @param array<string, string> $params
+     * @param array<string, mixed> $params
      */
     public static function login(
         array $params = []
@@ -57,12 +55,8 @@ final class AuthController
             $data['password'] ?? ''
         );
 
-        $deviceName = isset(
-            $data['device_name']
-        )
-            ? trim(
-                (string) $data['device_name']
-            )
+        $deviceName = isset($data['device_name'])
+            ? trim((string) $data['device_name'])
             : null;
 
         try {
@@ -89,7 +83,7 @@ final class AuthController
     /**
      * Return the currently authenticated user.
      *
-     * @param array<string, string> $params
+     * @param array<string, mixed> $params
      */
     public static function me(
         array $params = []
@@ -104,7 +98,7 @@ final class AuthController
     /**
      * Log out the current authentication session.
      *
-     * @param array<string, string> $params
+     * @param array<string, mixed> $params
      */
     public static function logout(
         array $params = []
@@ -134,9 +128,7 @@ final class AuthController
 
         AuthMiddleware::requireUser();
 
-        AuthService::logout(
-            $token
-        );
+        AuthService::logout($token);
 
         Response::success([
             'message' => 'Logged out successfully.',
@@ -149,9 +141,7 @@ final class AuthController
     private static function extractBearerToken(
         string $authorization
     ): ?string {
-        $authorization = trim(
-            $authorization
-        );
+        $authorization = trim($authorization);
 
         if (
             !str_starts_with(
