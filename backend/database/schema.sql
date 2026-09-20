@@ -211,6 +211,12 @@ CREATE TABLE IF NOT EXISTS found_ids (
         REFERENCES users(id)
         ON DELETE SET NULL,
 
+    /*
+     * Allows a person to report a found document without
+     * creating a SCAN-ID account.
+     */
+    finder_phone VARCHAR(20),
+
     id_type VARCHAR(50) NOT NULL DEFAULT 'national_id',
 
     id_number_hash TEXT NOT NULL,
@@ -240,7 +246,17 @@ CREATE TABLE IF NOT EXISTS found_ids (
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    /*
+     * A finder must have either:
+     * - a registered user account, or
+     * - a phone number for anonymous recovery contact.
+     */
+    CHECK (
+        finder_user_id IS NOT NULL
+        OR finder_phone IS NOT NULL
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_found_ids_hash
@@ -251,6 +267,9 @@ CREATE INDEX IF NOT EXISTS idx_found_ids_status
 
 CREATE INDEX IF NOT EXISTS idx_found_ids_finder
     ON found_ids(finder_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_found_ids_phone
+    ON found_ids(finder_phone);
 
 DROP TRIGGER IF EXISTS found_ids_updated_at
 ON found_ids;
@@ -332,13 +351,6 @@ EXECUTE FUNCTION set_updated_at();
 
 -- ============================================================
 -- RECOVERY TOKENS
---
--- Used for:
--- - SMS recovery links
--- - QR recovery
--- - secure handover verification
---
--- Only token hashes are stored.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS recovery_tokens (
@@ -430,7 +442,17 @@ CREATE TABLE IF NOT EXISTS recovery_payments (
         REFERENCES recovery_requests(id)
         ON DELETE CASCADE,
 
-    amount_kes INTEGER NOT NULL
+    /*
+     * SCAN-ID recovery payment:
+     *
+     * Owner pays KSh 300 total.
+     *
+     * KSh 150 = finder reward
+     * KSh 150 = SCAN-ID platform
+     *
+     * No additional recovery fee is added.
+     */
+    amount_kes INTEGER NOT NULL DEFAULT 300
         CHECK (amount_kes > 0),
 
     provider VARCHAR(50) NOT NULL DEFAULT 'mpesa',
@@ -478,6 +500,75 @@ ON recovery_payments;
 
 CREATE TRIGGER recovery_payments_updated_at
 BEFORE UPDATE ON recovery_payments
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- ============================================================
+-- FINDER REWARDS
+-- ============================================================
+--
+-- Finder reward lifecycle:
+--
+-- pending
+--    ↓
+-- payable
+--    ↓
+-- paid
+--
+-- The reward becomes payable ONLY after a verified handover.
+--
+-- Owner payment alone does NOT trigger the finder payout.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS finder_rewards (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    recovery_request_id UUID NOT NULL UNIQUE
+        REFERENCES recovery_requests(id)
+        ON DELETE CASCADE,
+
+    finder_phone VARCHAR(20) NOT NULL,
+
+    amount_kes INTEGER NOT NULL DEFAULT 150
+        CHECK (amount_kes > 0),
+
+    status VARCHAR(30) NOT NULL DEFAULT 'pending'
+        CHECK (
+            status IN (
+                'pending',
+                'payable',
+                'paid',
+                'failed',
+                'cancelled'
+            )
+        ),
+
+    payout_reference VARCHAR(255) UNIQUE,
+
+    paid_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_finder_rewards_request
+    ON finder_rewards(recovery_request_id);
+
+CREATE INDEX IF NOT EXISTS idx_finder_rewards_status
+    ON finder_rewards(status);
+
+CREATE INDEX IF NOT EXISTS idx_finder_rewards_phone
+    ON finder_rewards(finder_phone);
+
+CREATE INDEX IF NOT EXISTS idx_finder_rewards_created
+    ON finder_rewards(created_at);
+
+DROP TRIGGER IF EXISTS finder_rewards_updated_at
+ON finder_rewards;
+
+CREATE TRIGGER finder_rewards_updated_at
+BEFORE UPDATE ON finder_rewards
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
@@ -581,8 +672,8 @@ INSERT INTO schema_versions (
     description
 )
 VALUES (
-    1,
-    'Fresh SCAN-ID recovery network database foundation'
+    2,
+    'Add anonymous finder contact and finder reward system'
 )
 ON CONFLICT (version) DO NOTHING;
 
