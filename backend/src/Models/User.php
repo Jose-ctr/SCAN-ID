@@ -17,6 +17,8 @@ final class User
 
     /**
      * Find a user by UUID.
+     *
+     * Password hash is intentionally excluded.
      */
     public function findById(string $id): ?array
     {
@@ -47,6 +49,8 @@ final class User
 
     /**
      * Find a user by phone number.
+     *
+     * Includes password hash for authentication.
      */
     public function findByPhone(string $phone): ?array
     {
@@ -68,7 +72,7 @@ final class User
         );
 
         $stmt->execute([
-            'phone' => $phone,
+            'phone' => trim($phone),
         ]);
 
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -78,6 +82,8 @@ final class User
 
     /**
      * Find a user by email address.
+     *
+     * Password hash is intentionally excluded.
      */
     public function findByEmail(string $email): ?array
     {
@@ -87,14 +93,13 @@ final class User
                 full_name,
                 phone,
                 email,
-                password_hash,
                 role,
                 phone_verified_at,
                 is_active,
                 created_at,
                 updated_at
              FROM users
-             WHERE email = :email
+             WHERE LOWER(email) = LOWER(:email)
              LIMIT 1'
         );
 
@@ -108,34 +113,56 @@ final class User
     }
 
     /**
-     * Create a new user.
+     * Create a new SCAN-ID user.
      */
     public function create(
         string $fullName,
         string $phone,
-        ?string $email = null,
-        ?string $password = null
+        string $password,
+        ?string $email = null
     ): array {
         $fullName = trim($fullName);
         $phone = trim($phone);
+        $password = trim($password);
 
         if ($fullName === '') {
-            throw new RuntimeException('Full name is required.');
+            throw new RuntimeException(
+                'Full name is required.'
+            );
         }
 
         if ($phone === '') {
-            throw new RuntimeException('Phone number is required.');
+            throw new RuntimeException(
+                'Phone number is required.'
+            );
+        }
+
+        if ($password === '') {
+            throw new RuntimeException(
+                'Password is required.'
+            );
+        }
+
+        if (strlen($password) < 8) {
+            throw new RuntimeException(
+                'Password must be at least 8 characters.'
+            );
         }
 
         $email = $email !== null
             ? strtolower(trim($email))
             : null;
 
-        $passwordHash = $password !== null
-            ? password_hash($password, PASSWORD_DEFAULT)
-            : null;
+        if ($email === '') {
+            $email = null;
+        }
 
-        if ($password !== null && $passwordHash === false) {
+        $passwordHash = password_hash(
+            $password,
+            PASSWORD_DEFAULT
+        );
+
+        if ($passwordHash === false) {
             throw new RuntimeException(
                 'Unable to securely create password hash.'
             );
@@ -147,13 +174,17 @@ final class User
                     full_name,
                     phone,
                     email,
-                    password_hash
+                    password_hash,
+                    role,
+                    is_active
                 )
                 VALUES (
                     :full_name,
                     :phone,
                     :email,
-                    :password_hash
+                    :password_hash,
+                    :role,
+                    :is_active
                 )
                 RETURNING
                     id,
@@ -172,6 +203,8 @@ final class User
                 'phone' => $phone,
                 'email' => $email,
                 'password_hash' => $passwordHash,
+                'role' => 'user',
+                'is_active' => true,
             ]);
 
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -195,6 +228,18 @@ final class User
     }
 
     /**
+     * Find a user specifically for authentication.
+     *
+     * This is the only normal lookup that returns
+     * the password hash.
+     */
+    public function findForAuthentication(
+        string $phone
+    ): ?array {
+        return $this->findByPhone($phone);
+    }
+
+    /**
      * Verify a user's password.
      */
     public function verifyPassword(
@@ -202,7 +247,8 @@ final class User
         string $password
     ): bool {
         if (
-            empty($user['password_hash']) ||
+            !isset($user['password_hash']) ||
+            $user['password_hash'] === '' ||
             $password === ''
         ) {
             return false;
@@ -253,7 +299,8 @@ final class User
 
         $verifiedAt = $stmt->fetchColumn();
 
-        return $verifiedAt !== false && $verifiedAt !== null;
+        return $verifiedAt !== false
+            && $verifiedAt !== null;
     }
 
     /**
@@ -294,5 +341,18 @@ final class User
         ]);
 
         return $stmt->fetchColumn() !== false;
+    }
+
+    /**
+     * Remove sensitive authentication data.
+     */
+    public function publicData(
+        array $user
+    ): array {
+        unset(
+            $user['password_hash']
+        );
+
+        return $user;
     }
 }
