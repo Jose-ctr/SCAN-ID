@@ -5,13 +5,14 @@ declare(strict_types=1);
 namespace ScanId\Services;
 
 use RuntimeException;
+use ScanId\Config\Database;
 use ScanId\Models\PhoneVerification;
 use ScanId\Models\User;
 
 final class PhoneVerificationService
 {
     /**
-     * Create an OTP for a user's phone number.
+     * Create an OTP for an authenticated user's phone number.
      *
      * @return array{
      *     id: string,
@@ -31,7 +32,10 @@ final class PhoneVerificationService
             );
         }
 
-        $user = User::findById($userId);
+        $database = Database::connection();
+        $userModel = new User($database);
+
+        $user = $userModel->findById($userId);
 
         if ($user === null) {
             throw new RuntimeException(
@@ -46,7 +50,7 @@ final class PhoneVerificationService
         }
 
         $phone = trim(
-            (string) $user['phone']
+            (string) ($user['phone'] ?? '')
         );
 
         if ($phone === '') {
@@ -82,7 +86,10 @@ final class PhoneVerificationService
             );
         }
 
-        $user = User::findByPhone($phone);
+        $database = Database::connection();
+        $userModel = new User($database);
+
+        $user = $userModel->findByPhone($phone);
 
         return PhoneVerification::create(
             $phone,
@@ -125,12 +132,6 @@ final class PhoneVerificationService
             $otp
         );
 
-        if ($verification === null) {
-            throw new RuntimeException(
-                'Invalid, expired, or already used verification code.'
-            );
-        }
-
         return $verification;
     }
 
@@ -146,7 +147,10 @@ final class PhoneVerificationService
             return false;
         }
 
-        return User::isPhoneVerified(
+        $database = Database::connection();
+        $userModel = new User($database);
+
+        return $userModel->isPhoneVerified(
             $userId
         );
     }
