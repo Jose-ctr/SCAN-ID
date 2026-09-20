@@ -13,8 +13,8 @@ final class PhoneVerification
     /**
      * Create a new phone verification OTP.
      *
-     * The plain OTP is returned once so the SMS service
-     * can deliver it. Only the hash is stored in the database.
+     * The plain OTP is returned once for the SMS service.
+     * Only the password hash is stored in PostgreSQL.
      *
      * @return array{
      *     id: string,
@@ -50,6 +50,7 @@ final class PhoneVerification
         }
 
         $otp = self::generateOtp();
+
         $otpHash = password_hash(
             $otp,
             PASSWORD_DEFAULT
@@ -61,9 +62,11 @@ final class PhoneVerification
             );
         }
 
-        $database = self::db();
+        $database = Database::connection();
 
-        // Invalidate any previous unused OTP for this phone.
+        /*
+         * Invalidate previous unused OTPs for this phone.
+         */
         $invalidate = $database->prepare(
             '
             UPDATE phone_verifications
@@ -78,6 +81,9 @@ final class PhoneVerification
             ':phone' => $phone,
         ]);
 
+        /*
+         * Create the new OTP.
+         */
         $statement = $database->prepare(
             '
             INSERT INTO phone_verifications (
@@ -104,16 +110,23 @@ final class PhoneVerification
         );
 
         $statement->execute([
-            ':user_id' => $userId !== null && trim($userId) !== ''
-                ? trim($userId)
-                : null,
+            ':user_id' =>
+                $userId !== null && trim($userId) !== ''
+                    ? trim($userId)
+                    : null,
+
             ':phone' => $phone,
+
             ':otp_hash' => $otpHash,
+
             ':max_attempts' => $maxAttempts,
+
             ':ttl' => $ttlSeconds,
         ]);
 
-        $verification = $statement->fetch();
+        $verification = $statement->fetch(
+            PDO::FETCH_ASSOC
+        );
 
         if (!is_array($verification)) {
             throw new RuntimeException(
@@ -125,14 +138,24 @@ final class PhoneVerification
             'id' => (string) $verification['id'],
             'phone' => (string) $verification['phone'],
             'otp' => $otp,
-            'expires_at' => (string) $verification['expires_at'],
+            'expires_at' =>
+                (string) $verification['expires_at'],
         ];
     }
 
     /**
-     * Verify an OTP for a phone number.
+     * Verify an OTP.
      *
-     * @return array<string, mixed>|null
+     * The verification row is locked during the transaction
+     * so the same OTP cannot be successfully consumed twice
+     * by concurrent requests.
+     *
+     * @return array{
+     *     id: string,
+     *     user_id: string|null,
+     *     phone: string,
+     *     verified_at: string
+     * }|null
      */
     public static function verify(
         string $phone,
@@ -145,109 +168,156 @@ final class PhoneVerification
             return null;
         }
 
-        $database = self::db();
+        $database = Database::connection();
 
-        $statement = $database->prepare(
-            '
-            SELECT
-                id,
-                user_id,
-                phone,
-                otp_hash,
-                attempts,
-                max_attempts,
-                expires_at,
-                verified_at,
-                used_at
-            FROM phone_verifications
-            WHERE phone = :phone
-              AND used_at IS NULL
-              AND verified_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT 1
-            '
-        );
+        $database->beginTransaction();
 
-        $statement->execute([
-            ':phone' => $phone,
-        ]);
-
-        $verification = $statement->fetch();
-
-        if (!is_array($verification)) {
-            return null;
-        }
-
-        $expiresAt = strtotime(
-            (string) $verification['expires_at']
-        );
-
-        if (
-            $expiresAt === false ||
-            $expiresAt <= time()
-        ) {
-            self::markUsed(
-                (string) $verification['id']
+        try {
+            $statement = $database->prepare(
+                '
+                SELECT
+                    id,
+                    user_id,
+                    phone,
+                    otp_hash,
+                    attempts,
+                    max_attempts,
+                    expires_at
+                FROM phone_verifications
+                WHERE phone = :phone
+                  AND used_at IS NULL
+                  AND verified_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                FOR UPDATE
+                '
             );
 
-            return null;
-        }
+            $statement->execute([
+                ':phone' => $phone,
+            ]);
 
-        $attempts = (int) $verification['attempts'];
-        $maxAttempts = (int) $verification['max_attempts'];
-
-        if ($attempts >= $maxAttempts) {
-            self::markUsed(
-                (string) $verification['id']
+            $verification = $statement->fetch(
+                PDO::FETCH_ASSOC
             );
 
-            return null;
-        }
+            if (!is_array($verification)) {
+                $database->rollBack();
 
-        $valid = password_verify(
-            $otp,
-            (string) $verification['otp_hash']
-        );
+                return null;
+            }
 
-        if (!$valid) {
-            self::incrementAttempts(
-                (string) $verification['id']
+            $verificationId =
+                (string) $verification['id'];
+
+            $expiresAt = strtotime(
+                (string) $verification['expires_at']
             );
 
-            return null;
-        }
+            if (
+                $expiresAt === false ||
+                $expiresAt <= time()
+            ) {
+                self::markUsed(
+                    $database,
+                    $verificationId
+                );
 
-        $verified = self::markVerified(
-            (string) $verification['id']
-        );
+                $database->commit();
 
-        if (!$verified) {
-            return null;
-        }
+                return null;
+            }
 
-        $userId = $verification['user_id'];
+            $attempts =
+                (int) $verification['attempts'];
 
-        if (
-            is_string($userId) &&
-            $userId !== ''
-        ) {
-            User::markPhoneVerified(
-                $userId
+            $maxAttempts =
+                (int) $verification['max_attempts'];
+
+            if ($attempts >= $maxAttempts) {
+                self::markUsed(
+                    $database,
+                    $verificationId
+                );
+
+                $database->commit();
+
+                return null;
+            }
+
+            $valid = password_verify(
+                $otp,
+                (string) $verification['otp_hash']
             );
-        }
 
-        return [
-            'id' => (string) $verification['id'],
-            'user_id' => $userId,
-            'phone' => (string) $verification['phone'],
-            'verified_at' => date(
-                'Y-m-d H:i:s'
-            ),
-        ];
+            if (!$valid) {
+                self::incrementAttempts(
+                    $database,
+                    $verificationId
+                );
+
+                $database->commit();
+
+                return null;
+            }
+
+            $verified = self::markVerified(
+                $database,
+                $verificationId
+            );
+
+            if (!$verified) {
+                $database->rollBack();
+
+                return null;
+            }
+
+            $userId = $verification['user_id'];
+
+            $database->commit();
+
+            /*
+             * Update the user only after the verification
+             * transaction has completed successfully.
+             */
+            if (
+                is_string($userId) &&
+                $userId !== ''
+            ) {
+                $userModel = new User($database);
+
+                $userModel->markPhoneVerified(
+                    $userId
+                );
+            }
+
+            return [
+                'id' => $verificationId,
+
+                'user_id' =>
+                    $userId !== null
+                        ? (string) $userId
+                        : null,
+
+                'phone' =>
+                    (string) $verification['phone'],
+
+                'verified_at' =>
+                    date('Y-m-d H:i:s'),
+            ];
+        } catch (\Throwable $exception) {
+            if ($database->inTransaction()) {
+                $database->rollBack();
+            }
+
+            throw $exception;
+        }
     }
 
     /**
-     * Find the latest active verification for a phone number.
+     * Find the latest verification for a phone number.
+     *
+     * The OTP hash is never returned.
      *
      * @return array<string, mixed>|null
      */
@@ -260,7 +330,7 @@ final class PhoneVerification
             return null;
         }
 
-        $statement = self::db()->prepare(
+        $statement = Database::connection()->prepare(
             '
             SELECT
                 id,
@@ -283,7 +353,9 @@ final class PhoneVerification
             ':phone' => $phone,
         ]);
 
-        $verification = $statement->fetch();
+        $verification = $statement->fetch(
+            PDO::FETCH_ASSOC
+        );
 
         return is_array($verification)
             ? $verification
@@ -294,9 +366,10 @@ final class PhoneVerification
      * Mark a verification as successfully verified.
      */
     private static function markVerified(
+        PDO $database,
         string $id
     ): bool {
-        $statement = self::db()->prepare(
+        $statement = $database->prepare(
             '
             UPDATE phone_verifications
             SET verified_at = NOW()
@@ -318,9 +391,10 @@ final class PhoneVerification
      * Mark a verification as consumed.
      */
     private static function markUsed(
+        PDO $database,
         string $id
     ): bool {
-        $statement = self::db()->prepare(
+        $statement = $database->prepare(
             '
             UPDATE phone_verifications
             SET used_at = NOW()
@@ -338,12 +412,13 @@ final class PhoneVerification
     }
 
     /**
-     * Increase the failed-attempt counter.
+     * Increase failed-attempt counter.
      */
     private static function incrementAttempts(
+        PDO $database,
         string $id
     ): void {
-        $statement = self::db()->prepare(
+        $statement = $database->prepare(
             '
             UPDATE phone_verifications
             SET attempts = attempts + 1
@@ -359,7 +434,7 @@ final class PhoneVerification
     }
 
     /**
-     * Generate a six-digit numeric OTP.
+     * Generate a cryptographically secure six-digit OTP.
      */
     private static function generateOtp(): string
     {
@@ -369,11 +444,6 @@ final class PhoneVerification
             '0',
             STR_PAD_LEFT
         );
-    }
-
-    private static function db(): PDO
-    {
-        return Database::connection();
     }
 
     private function __construct()
