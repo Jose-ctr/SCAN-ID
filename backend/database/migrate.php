@@ -57,10 +57,36 @@ try {
         );
     }
 
+    /*
+     * Execute the complete schema inside PostgreSQL.
+     *
+     * The schema itself controls:
+     * - tables
+     * - indexes
+     * - triggers
+     * - constraints
+     * - schema versions
+     */
     $connection->exec($sql);
 
+    /*
+     * Read the highest schema version recorded
+     * by the database.
+     */
+    $statement = $connection->query(
+        'SELECT MAX(version) FROM schema_versions'
+    );
+
+    $version = $statement->fetchColumn();
+
+    if ($version === false || $version === null) {
+        throw new RuntimeException(
+            'Database migration completed, but no schema version was recorded.'
+        );
+    }
+
     echo "SCAN-ID database migration completed successfully.\n";
-    echo "Schema version: 1\n";
+    echo "Schema version: " . (int) $version . "\n";
 
     exit(0);
 } catch (Throwable $exception) {
