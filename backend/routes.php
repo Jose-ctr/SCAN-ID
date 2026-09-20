@@ -5,6 +5,7 @@ declare(strict_types=1);
 use ScanId\Config\Database;
 use ScanId\Controllers\AuthController;
 use ScanId\Controllers\PhoneVerificationController;
+use ScanId\Controllers\ReportController;
 use ScanId\Http\AuthMiddleware;
 use ScanId\Http\Response;
 use ScanId\Http\Router;
@@ -50,6 +51,17 @@ $router->post(
 $router->post(
     '/api/auth/login',
     [AuthController::class, 'login']
+);
+
+/*
+ * ============================================================
+ * FOUND ID REPORTS — PUBLIC
+ * ============================================================
+ */
+
+$router->post(
+    '/api/report',
+    [ReportController::class, 'store']
 );
 
 /*
