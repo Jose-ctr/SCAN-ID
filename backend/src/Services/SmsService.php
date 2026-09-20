@@ -9,10 +9,12 @@ use RuntimeException;
 final class SmsService
 {
     /**
-     * Send an SMS message.
+     * Send an SMS through Africa's Talking.
      *
-     * Africa's Talking integration will use this service.
-     * No SMS credentials are hard-coded in the application.
+     * IMPORTANT:
+     * - API credentials must remain server-side.
+     * - Provider responses are never returned in full.
+     * - Provider/network errors are not exposed to API clients.
      */
     public static function send(
         string $phone,
@@ -30,6 +32,12 @@ final class SmsService
         if ($message === '') {
             throw new RuntimeException(
                 'SMS message is required.'
+            );
+        }
+
+        if (mb_strlen($message) > 1600) {
+            throw new RuntimeException(
+                'SMS message is too long.'
             );
         }
 
@@ -70,8 +78,10 @@ final class SmsService
         }
 
         $environment = strtolower(
-            (string) (
-                $_ENV['APP_ENV'] ?? 'local'
+            trim(
+                (string) (
+                    $_ENV['APP_ENV'] ?? 'local'
+                )
             )
         );
 
@@ -79,12 +89,17 @@ final class SmsService
             ? 'https://api.africastalking.com/version1/messaging'
             : 'https://api.sandbox.africastalking.com/version1/messaging';
 
-        $payload = http_build_query([
-            'username' => $username,
-            'to' => $phone,
-            'message' => $message,
-            'from' => $senderId,
-        ]);
+        $payload = http_build_query(
+            [
+                'username' => $username,
+                'to' => $phone,
+                'message' => $message,
+                'from' => $senderId,
+            ],
+            '',
+            '&',
+            PHP_QUERY_RFC3986
+        );
 
         $curl = curl_init($endpoint);
 
@@ -111,6 +126,7 @@ final class SmsService
         );
 
         $responseBody = curl_exec($curl);
+
         $httpStatus = (int) curl_getinfo(
             $curl,
             CURLINFO_HTTP_CODE
@@ -121,13 +137,14 @@ final class SmsService
         curl_close($curl);
 
         if ($responseBody === false) {
+            /*
+             * Do not expose the provider's internal error to
+             * the API client. Logging can be added later.
+             */
+            unset($curlError);
+
             throw new RuntimeException(
                 'SMS provider connection failed.'
-                . (
-                    $curlError !== ''
-                        ? ' ' . $curlError
-                        : ''
-                )
             );
         }
 
@@ -157,18 +174,25 @@ final class SmsService
             );
         }
 
+        $status = trim(
+            (string) (
+                $recipient['status'] ?? ''
+            )
+        );
+
+        if ($status === '') {
+            $status = 'Unknown';
+        }
+
         return [
             'phone' => $phone,
-            'status' => (string) (
-                $recipient['status'] ?? 'Unknown'
-            ),
+            'status' => $status,
             'message_id' => isset($recipient['messageId'])
                 ? (string) $recipient['messageId']
                 : null,
             'cost' => isset($recipient['cost'])
                 ? (string) $recipient['cost']
                 : null,
-            'provider_response' => $response,
         ];
     }
 
@@ -181,6 +205,12 @@ final class SmsService
     ): array {
         $phone = trim($phone);
         $otp = trim($otp);
+
+        if ($phone === '') {
+            throw new RuntimeException(
+                'Recipient phone number is required.'
+            );
+        }
 
         if (!preg_match('/^\d{6}$/', $otp)) {
             throw new RuntimeException(
