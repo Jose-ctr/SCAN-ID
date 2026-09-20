@@ -117,18 +117,31 @@ function App() {
 
         video.srcObject = stream;
 
-        const playVideo = async () => {
-            try {
-                await video.play();
-            } catch (error) {
+        const handleCanPlay = () => {
+            video.play().catch((error) => {
                 console.error(
                     "Video playback error:",
                     error
                 );
-            }
+            });
         };
 
-        playVideo();
+        video.addEventListener(
+            "canplay",
+            handleCanPlay,
+            { once: true }
+        );
+
+        if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+            handleCanPlay();
+        }
+
+        return () => {
+            video.removeEventListener(
+                "canplay",
+                handleCanPlay
+            );
+        };
     }, [cameraOpen]);
 
     const stopCamera = () => {
@@ -152,7 +165,7 @@ function App() {
         setCameraOpen(false);
     };
 
-    const captureImage = () => {
+    const captureImage = async () => {
         const video = videoRef.current;
         const canvas = canvasRef.current;
 
@@ -163,12 +176,70 @@ function App() {
             return;
         }
 
+        setCameraError("");
+
+        if (
+            video.readyState <
+                HTMLMediaElement.HAVE_METADATA ||
+            video.videoWidth === 0 ||
+            video.videoHeight === 0
+        ) {
+            await new Promise((resolve) => {
+                let finished = false;
+
+                const finish = () => {
+                    if (finished) {
+                        return;
+                    }
+
+                    finished = true;
+
+                    video.removeEventListener(
+                        "loadedmetadata",
+                        finish
+                    );
+
+                    video.removeEventListener(
+                        "canplay",
+                        finish
+                    );
+
+                    video.removeEventListener(
+                        "playing",
+                        finish
+                    );
+
+                    resolve();
+                };
+
+                video.addEventListener(
+                    "loadedmetadata",
+                    finish,
+                    { once: true }
+                );
+
+                video.addEventListener(
+                    "canplay",
+                    finish,
+                    { once: true }
+                );
+
+                video.addEventListener(
+                    "playing",
+                    finish,
+                    { once: true }
+                );
+
+                setTimeout(finish, 2000);
+            });
+        }
+
         if (
             video.videoWidth === 0 ||
             video.videoHeight === 0
         ) {
             setCameraError(
-                "Camera is not ready yet. Please wait a moment and try again."
+                "Camera could not start correctly. Please stop the camera and try again."
             );
             return;
         }
