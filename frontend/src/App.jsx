@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 function App() {
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
+    const streamRef = useRef(null);
 
     const [cameraOpen, setCameraOpen] = useState(false);
     const [cameraError, setCameraError] = useState("");
@@ -29,6 +30,13 @@ function App() {
     const startCamera = async () => {
         setCameraError("");
 
+        if (!window.isSecureContext) {
+            setCameraError(
+                "Camera access requires a secure connection. Open SCAN-ID using HTTPS."
+            );
+            return;
+        }
+
         if (!navigator.mediaDevices?.getUserMedia) {
             setCameraError(
                 "Camera access is not supported by this browser."
@@ -37,41 +45,107 @@ function App() {
         }
 
         try {
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach((track) => {
+                    track.stop();
+                });
+
+                streamRef.current = null;
+            }
+
             const stream =
                 await navigator.mediaDevices.getUserMedia({
                     video: {
                         facingMode: {
                             ideal: "environment",
                         },
+                        width: {
+                            ideal: 1920,
+                        },
+                        height: {
+                            ideal: 1080,
+                        },
                     },
                     audio: false,
                 });
 
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                await videoRef.current.play();
-            }
+            streamRef.current = stream;
 
             setCameraOpen(true);
         } catch (error) {
             console.error("Camera error:", error);
 
-            setCameraError(
-                "Camera access was denied or is unavailable. Please allow camera permission and try again."
-            );
+            if (error.name === "NotAllowedError") {
+                setCameraError(
+                    "Camera permission was denied. Allow camera access in your browser settings and try again."
+                );
+            } else if (error.name === "NotFoundError") {
+                setCameraError(
+                    "No camera was found on this device."
+                );
+            } else if (error.name === "NotReadableError") {
+                setCameraError(
+                    "The camera is already being used by another application."
+                );
+            } else if (error.name === "SecurityError") {
+                setCameraError(
+                    "Camera access was blocked for security reasons. Use the HTTPS SCAN-ID website."
+                );
+            } else if (error.name === "OverconstrainedError") {
+                setCameraError(
+                    "The requested camera configuration is not available on this device."
+                );
+            } else {
+                setCameraError(
+                    "Camera access failed. Please check your camera permission and try again."
+                );
+            }
         }
     };
 
-    const stopCamera = () => {
+    useEffect(() => {
+        if (!cameraOpen) {
+            return;
+        }
+
         const video = videoRef.current;
+        const stream = streamRef.current;
 
-        if (video?.srcObject) {
-            const tracks = video.srcObject.getTracks();
+        if (!video || !stream) {
+            return;
+        }
 
-            tracks.forEach((track) => {
+        video.srcObject = stream;
+
+        const playVideo = async () => {
+            try {
+                await video.play();
+            } catch (error) {
+                console.error(
+                    "Video playback error:",
+                    error
+                );
+            }
+        };
+
+        playVideo();
+    }, [cameraOpen]);
+
+    const stopCamera = () => {
+        const stream = streamRef.current;
+
+        if (stream) {
+            stream.getTracks().forEach((track) => {
                 track.stop();
             });
 
+            streamRef.current = null;
+        }
+
+        const video = videoRef.current;
+
+        if (video) {
+            video.pause();
             video.srcObject = null;
         }
 
@@ -83,6 +157,9 @@ function App() {
         const canvas = canvasRef.current;
 
         if (!video || !canvas) {
+            setCameraError(
+                "Camera is not available."
+            );
             return;
         }
 
@@ -127,6 +204,7 @@ function App() {
 
     const clearCapturedImage = () => {
         setCapturedImage("");
+        setCameraError("");
     };
 
     const handleSubmit = (event) => {
@@ -136,12 +214,12 @@ function App() {
 
     useEffect(() => {
         return () => {
-            const video = videoRef.current;
+            const stream = streamRef.current;
 
-            if (video?.srcObject) {
-                video.srcObject
-                    .getTracks()
-                    .forEach((track) => track.stop());
+            if (stream) {
+                stream.getTracks().forEach((track) => {
+                    track.stop();
+                });
             }
         };
     }, []);
@@ -238,9 +316,7 @@ function App() {
                             SCAN FOUND ID
                         </span>
 
-                        <h2>
-                            Use your camera
-                        </h2>
+                        <h2>Use your camera</h2>
 
                         <p>
                             Capture the found ID securely.
