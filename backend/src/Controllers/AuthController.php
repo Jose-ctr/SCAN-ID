@@ -23,16 +23,22 @@ final class AuthController
         $data = Request::json();
 
         try {
-            $user = AuthService::register($data);
+            $result = AuthService::register($data);
 
-            Response::success([
-                'user' => $user,
-                'message' => 'Account created successfully.',
-            ], 201);
+            Response::success(
+                $result,
+                'Account created successfully.',
+                201
+            );
         } catch (RuntimeException $exception) {
             Response::error(
                 $exception->getMessage(),
                 422
+            );
+        } catch (\Throwable $exception) {
+            Response::error(
+                'Unable to create account.',
+                500
             );
         }
     }
@@ -60,22 +66,25 @@ final class AuthController
             : null;
 
         try {
-            $authentication = AuthService::login(
+            $result = AuthService::login(
                 $phone,
                 $password,
                 $deviceName
             );
 
-            Response::success([
-                'user' => $authentication['user'],
-                'token' => $authentication['token'],
-                'token_type' => $authentication['token_type'],
-                'expires_in' => $authentication['expires_in'],
-            ]);
+            Response::success(
+                $result,
+                'Login successful.'
+            );
         } catch (RuntimeException $exception) {
             Response::error(
                 $exception->getMessage(),
                 401
+            );
+        } catch (\Throwable $exception) {
+            Response::error(
+                'Unable to authenticate user.',
+                500
             );
         }
     }
@@ -90,9 +99,12 @@ final class AuthController
     ): never {
         $user = AuthMiddleware::requireUser();
 
-        Response::success([
-            'user' => $user,
-        ]);
+        Response::success(
+            [
+                'user' => $user,
+            ],
+            'Authenticated user.'
+        );
     }
 
     /**
@@ -126,13 +138,18 @@ final class AuthController
             );
         }
 
+        /*
+         * Confirm that the session is valid before
+         * revoking it.
+         */
         AuthMiddleware::requireUser();
 
         AuthService::logout($token);
 
-        Response::success([
-            'message' => 'Logged out successfully.',
-        ]);
+        Response::success(
+            null,
+            'Logged out successfully.'
+        );
     }
 
     /**
