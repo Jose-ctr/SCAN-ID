@@ -10,15 +10,15 @@ use RuntimeException;
 final class FinderReward
 {
     public function __construct(
-        private readonly PDO $database
+        private readonly PDO $db
     ) {
     }
 
     /**
-     * Create a finder reward for a recovery request.
+     * Create a finder reward for a completed recovery request.
      *
-     * The reward is not paid at creation time.
-     * It remains pending until the handover is verified.
+     * The reward is NOT payable immediately.
+     * It becomes payable only after SCAN-ID verifies the handover.
      */
     public function create(
         string $recoveryRequestId,
@@ -40,37 +40,15 @@ final class FinderReward
             );
         }
 
-        if (strlen($finderPhone) > 30) {
-            throw new RuntimeException(
-                'Finder phone number is too long.'
-            );
-        }
-
         if ($amountKes <= 0) {
             throw new RuntimeException(
-                'Finder reward must be greater than zero.'
+                'Finder reward amount must be greater than zero.'
             );
         }
 
-        if (!$this->recoveryRequestExists($recoveryRequestId)) {
-            throw new RuntimeException(
-                'Recovery request not found.'
-            );
-        }
+        $this->assertRecoveryRequestExists($recoveryRequestId);
 
-        /*
-         * Prevent duplicate rewards for the same recovery.
-         */
-        $existing = $this->findByRecoveryRequest(
-            $recoveryRequestId
-        );
-
-        if ($existing !== null) {
-            return $existing;
-        }
-
-        $statement = $this->database->prepare(
-            '
+        $sql = <<<'SQL'
             INSERT INTO finder_rewards (
                 recovery_request_id,
                 finder_phone,
@@ -78,11 +56,16 @@ final class FinderReward
                 status
             )
             VALUES (
-                CAST(:recovery_request_id AS UUID),
+                :recovery_request_id,
                 :finder_phone,
                 :amount_kes,
-                \'pending\'
+                'pending'
             )
+            ON CONFLICT (recovery_request_id)
+            DO UPDATE SET
+                finder_phone = EXCLUDED.finder_phone,
+                amount_kes = EXCLUDED.amount_kes,
+                updated_at = NOW()
             RETURNING
                 id,
                 recovery_request_id,
@@ -93,8 +76,9 @@ final class FinderReward
                 paid_at,
                 created_at,
                 updated_at
-            '
-        );
+        SQL;
+
+        $statement = $this->db->prepare($sql);
 
         $statement->execute([
             'recovery_request_id' => $recoveryRequestId,
@@ -102,11 +86,11 @@ final class FinderReward
             'amount_kes' => $amountKes,
         ]);
 
-        $reward = $statement->fetch();
+        $reward = $statement->fetch(PDO::FETCH_ASSOC);
 
-        if (!is_array($reward)) {
+        if ($reward === false) {
             throw new RuntimeException(
-                'Unable to create finder reward.'
+                'Finder reward could not be created.'
             );
         }
 
@@ -116,42 +100,39 @@ final class FinderReward
     /**
      * Find a reward by ID.
      */
-    public function findById(
-        string $id
-    ): ?array {
+    public function findById(string $id): ?array
+    {
         $id = trim($id);
 
         if ($id === '') {
             return null;
         }
 
-        $statement = $this->database->prepare(
-            '
-            SELECT
-                id,
-                recovery_request_id,
-                finder_phone,
-                amount_kes,
-                status,
-                payout_reference,
-                paid_at,
-                created_at,
-                updated_at
-            FROM finder_rewards
-            WHERE id = CAST(:id AS UUID)
-            LIMIT 1
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    recovery_request_id,
+                    finder_phone,
+                    amount_kes,
+                    status,
+                    payout_reference,
+                    paid_at,
+                    created_at,
+                    updated_at
+                FROM finder_rewards
+                WHERE id = :id
+                LIMIT 1
+            SQL
         );
 
         $statement->execute([
             'id' => $id,
         ]);
 
-        $reward = $statement->fetch();
+        $reward = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($reward)
-            ? $reward
-            : null;
+        return $reward === false ? null : $reward;
     }
 
     /**
@@ -160,52 +141,44 @@ final class FinderReward
     public function findByRecoveryRequest(
         string $recoveryRequestId
     ): ?array {
-        $recoveryRequestId = trim(
-            $recoveryRequestId
-        );
+        $recoveryRequestId = trim($recoveryRequestId);
 
         if ($recoveryRequestId === '') {
             return null;
         }
 
-        $statement = $this->database->prepare(
-            '
-            SELECT
-                id,
-                recovery_request_id,
-                finder_phone,
-                amount_kes,
-                status,
-                payout_reference,
-                paid_at,
-                created_at,
-                updated_at
-            FROM finder_rewards
-            WHERE recovery_request_id =
-                CAST(:recovery_request_id AS UUID)
-            LIMIT 1
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    recovery_request_id,
+                    finder_phone,
+                    amount_kes,
+                    status,
+                    payout_reference,
+                    paid_at,
+                    created_at,
+                    updated_at
+                FROM finder_rewards
+                WHERE recovery_request_id = :recovery_request_id
+                LIMIT 1
+            SQL
         );
 
         $statement->execute([
             'recovery_request_id' => $recoveryRequestId,
         ]);
 
-        $reward = $statement->fetch();
+        $reward = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($reward)
-            ? $reward
-            : null;
+        return $reward === false ? null : $reward;
     }
 
     /**
-     * Make a pending reward eligible for payout.
-     *
-     * This should only be called after verified handover.
+     * Mark reward as payable after verified successful handover.
      */
-    public function markPayable(
-        string $id
-    ): ?array {
+    public function markPayable(string $id): array
+    {
         $id = trim($id);
 
         if ($id === '') {
@@ -214,47 +187,68 @@ final class FinderReward
             );
         }
 
-        $statement = $this->database->prepare(
-            '
-            UPDATE finder_rewards
-            SET
-                status = \'payable\',
-                updated_at = NOW()
-            WHERE id = CAST(:id AS UUID)
-              AND status = \'pending\'
-            RETURNING
-                id,
-                recovery_request_id,
-                finder_phone,
-                amount_kes,
-                status,
-                payout_reference,
-                paid_at,
-                created_at,
-                updated_at
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE finder_rewards
+                SET
+                    status = 'payable',
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND status = 'pending'
+                RETURNING
+                    id,
+                    recovery_request_id,
+                    finder_phone,
+                    amount_kes,
+                    status,
+                    payout_reference,
+                    paid_at,
+                    created_at,
+                    updated_at
+            SQL
         );
 
         $statement->execute([
             'id' => $id,
         ]);
 
-        $reward = $statement->fetch();
+        $reward = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($reward)
-            ? $reward
-            : null;
+        if ($reward === false) {
+            $existing = $this->findById($id);
+
+            if ($existing === null) {
+                throw new RuntimeException(
+                    'Finder reward not found.'
+                );
+            }
+
+            if ($existing['status'] === 'payable') {
+                return $existing;
+            }
+
+            if ($existing['status'] === 'paid') {
+                return $existing;
+            }
+
+            throw new RuntimeException(
+                'Finder reward cannot be marked payable from its current status.'
+            );
+        }
+
+        return $reward;
     }
 
     /**
-     * Mark the reward as paid.
+     * Mark reward as successfully paid.
      *
-     * payout_reference must come from the verified payment provider.
+     * payout_reference must be unique so the same payout
+     * cannot accidentally be recorded twice.
      */
     public function markPaid(
         string $id,
         string $payoutReference
-    ): ?array {
+    ): array {
         $id = trim($id);
         $payoutReference = trim($payoutReference);
 
@@ -270,33 +264,27 @@ final class FinderReward
             );
         }
 
-        if (strlen($payoutReference) > 100) {
-            throw new RuntimeException(
-                'Payout reference is too long.'
-            );
-        }
-
-        $statement = $this->database->prepare(
-            '
-            UPDATE finder_rewards
-            SET
-                status = \'paid\',
-                payout_reference = :payout_reference,
-                paid_at = COALESCE(paid_at, NOW()),
-                updated_at = NOW()
-            WHERE id = CAST(:id AS UUID)
-              AND status = \'payable\'
-            RETURNING
-                id,
-                recovery_request_id,
-                finder_phone,
-                amount_kes,
-                status,
-                payout_reference,
-                paid_at,
-                created_at,
-                updated_at
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE finder_rewards
+                SET
+                    status = 'paid',
+                    payout_reference = :payout_reference,
+                    paid_at = COALESCE(paid_at, NOW()),
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND status = 'payable'
+                RETURNING
+                    id,
+                    recovery_request_id,
+                    finder_phone,
+                    amount_kes,
+                    status,
+                    payout_reference,
+                    paid_at,
+                    created_at,
+                    updated_at
+            SQL
         );
 
         $statement->execute([
@@ -304,19 +292,49 @@ final class FinderReward
             'payout_reference' => $payoutReference,
         ]);
 
-        $reward = $statement->fetch();
+        $reward = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($reward)
-            ? $reward
-            : null;
+        if ($reward !== false) {
+            return $reward;
+        }
+
+        $existing = $this->findById($id);
+
+        if ($existing === null) {
+            throw new RuntimeException(
+                'Finder reward not found.'
+            );
+        }
+
+        /*
+         * Idempotency:
+         * If the reward was already marked paid with the same
+         * payout reference, return the existing record instead
+         * of creating another payment.
+         */
+        if (
+            $existing['status'] === 'paid'
+            && $existing['payout_reference'] === $payoutReference
+        ) {
+            return $existing;
+        }
+
+        if ($existing['status'] === 'paid') {
+            throw new RuntimeException(
+                'Finder reward has already been paid.'
+            );
+        }
+
+        throw new RuntimeException(
+            'Finder reward is not currently payable.'
+        );
     }
 
     /**
-     * Mark a reward as failed.
+     * Mark a reward payout as failed.
      */
-    public function markFailed(
-        string $id
-    ): ?array {
+    public function markFailed(string $id): array
+    {
         $id = trim($id);
 
         if ($id === '') {
@@ -325,69 +343,153 @@ final class FinderReward
             );
         }
 
-        $statement = $this->database->prepare(
-            '
-            UPDATE finder_rewards
-            SET
-                status = \'failed\',
-                updated_at = NOW()
-            WHERE id = CAST(:id AS UUID)
-              AND status IN (\'pending\', \'payable\')
-            RETURNING
-                id,
-                recovery_request_id,
-                finder_phone,
-                amount_kes,
-                status,
-                payout_reference,
-                paid_at,
-                created_at,
-                updated_at
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE finder_rewards
+                SET
+                    status = 'failed',
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND status IN ('pending', 'payable')
+                RETURNING
+                    id,
+                    recovery_request_id,
+                    finder_phone,
+                    amount_kes,
+                    status,
+                    payout_reference,
+                    paid_at,
+                    created_at,
+                    updated_at
+            SQL
         );
 
         $statement->execute([
             'id' => $id,
         ]);
 
-        $reward = $statement->fetch();
+        $reward = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($reward)
-            ? $reward
-            : null;
+        if ($reward === false) {
+            $existing = $this->findById($id);
+
+            if ($existing === null) {
+                throw new RuntimeException(
+                    'Finder reward not found.'
+                );
+            }
+
+            if ($existing['status'] === 'failed') {
+                return $existing;
+            }
+
+            if ($existing['status'] === 'paid') {
+                throw new RuntimeException(
+                    'A paid finder reward cannot be marked as failed.'
+                );
+            }
+
+            throw new RuntimeException(
+                'Finder reward cannot be marked as failed from its current status.'
+            );
+        }
+
+        return $reward;
     }
 
     /**
-     * Check whether the reward has already been paid.
+     * Check whether a reward has already been paid.
      */
-    public function isPaid(
-        string $id
-    ): bool {
+    public function isPaid(string $id): bool
+    {
         $reward = $this->findById($id);
 
-        return $reward !== null
-            && $reward['status'] === 'paid';
+        if ($reward === null) {
+            return false;
+        }
+
+        return $reward['status'] === 'paid';
     }
 
     /**
-     * Check whether a recovery request exists.
+     * Get rewards by status.
      */
-    private function recoveryRequestExists(
+    public function findByStatus(
+        string $status,
+        int $limit = 100
+    ): array {
+        $allowedStatuses = [
+            'pending',
+            'payable',
+            'paid',
+            'failed',
+            'cancelled',
+        ];
+
+        if (!in_array($status, $allowedStatuses, true)) {
+            throw new RuntimeException(
+                'Invalid finder reward status.'
+            );
+        }
+
+        $limit = max(1, min($limit, 500));
+
+        $sql = sprintf(
+            <<<'SQL'
+                SELECT
+                    id,
+                    recovery_request_id,
+                    finder_phone,
+                    amount_kes,
+                    status,
+                    payout_reference,
+                    paid_at,
+                    created_at,
+                    updated_at
+                FROM finder_rewards
+                WHERE status = :status
+                ORDER BY created_at ASC
+                LIMIT %d
+            SQL,
+            $limit
+        );
+
+        $statement = $this->db->prepare($sql);
+
+        $statement->execute([
+            'status' => $status,
+        ]);
+
+        return $statement->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Confirm that the recovery request exists.
+     */
+    private function assertRecoveryRequestExists(
         string $recoveryRequestId
-    ): bool {
-        $statement = $this->database->prepare(
-            '
-            SELECT 1
-            FROM recovery_requests
-            WHERE id = CAST(:id AS UUID)
-            LIMIT 1
-            '
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM recovery_requests
+                WHERE id = :id
+                LIMIT 1
+            SQL
         );
 
         $statement->execute([
             'id' => $recoveryRequestId,
         ]);
 
-        return $statement->fetchColumn() !== false;
+        if ($statement->fetchColumn() === false) {
+            throw new RuntimeException(
+                'Recovery request not found.'
+            );
+        }
+    }
+
+    private function __clone(): void
+    {
     }
 }
