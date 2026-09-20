@@ -110,8 +110,9 @@ final class ReportController
                 'id_number' => $idNumber,
                 'location_found' => $locationFound,
                 'reporter_phone' => $reporterPhone,
+                'status' => 'validated',
             ],
-            'Found-ID report validated successfully.'
+            200
         );
     }
 
