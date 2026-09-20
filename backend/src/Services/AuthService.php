@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScanId\Services;
 
+use PDO;
 use RuntimeException;
 use ScanId\Config\Database;
 use ScanId\Models\User;
@@ -13,28 +14,27 @@ final class AuthService
     /**
      * Register a new SCAN-ID user.
      *
-     * @param array{
-     *     full_name: string,
-     *     phone: string,
-     *     email?: string|null,
-     *     password?: string|null
-     * } $data
-     *
+     * @param array<string, mixed> $data
      * @return array<string, mixed>
      */
     public static function register(array $data): array
     {
-        $fullName = trim($data['full_name'] ?? '');
-        $phone = trim($data['phone'] ?? '');
+        $fullName = trim((string) ($data['full_name'] ?? ''));
+        $phone = trim((string) ($data['phone'] ?? ''));
         $email = isset($data['email'])
             ? trim((string) $data['email'])
             : null;
-
-        $password = $data['password'] ?? null;
+        $password = (string) ($data['password'] ?? '');
 
         if ($fullName === '') {
             throw new RuntimeException(
                 'Full name is required.'
+            );
+        }
+
+        if (mb_strlen($fullName) > 150) {
+            throw new RuntimeException(
+                'Full name is too long.'
             );
         }
 
@@ -44,7 +44,13 @@ final class AuthService
             );
         }
 
-        if ($password === null || $password === '') {
+        if (mb_strlen($phone) > 30) {
+            throw new RuntimeException(
+                'Phone number is too long.'
+            );
+        }
+
+        if ($password === '') {
             throw new RuntimeException(
                 'Password is required.'
             );
@@ -52,41 +58,60 @@ final class AuthService
 
         if (strlen($password) < 8) {
             throw new RuntimeException(
-                'Password must be at least 8 characters.'
+                'Password must contain at least 8 characters.'
             );
         }
 
-        if (User::findByPhone($phone) !== null) {
-            throw new RuntimeException(
-                'A user with this phone number already exists.'
-            );
+        if ($email === '') {
+            $email = null;
         }
 
-        if ($email !== null && $email !== '') {
+        if ($email !== null) {
             if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 throw new RuntimeException(
                     'Invalid email address.'
                 );
             }
 
-            if (User::findByEmail($email) !== null) {
+            if (mb_strlen($email) > 255) {
                 throw new RuntimeException(
-                    'A user with this email address already exists.'
+                    'Email address is too long.'
                 );
             }
         }
 
-        return User::create([
-            'full_name' => $fullName,
-            'phone' => $phone,
-            'email' => $email,
-            'password' => $password,
-            'role' => 'user',
-        ]);
+        $database = Database::connection();
+        $userModel = new User($database);
+
+        if ($userModel->findByPhone($phone) !== null) {
+            throw new RuntimeException(
+                'A user with this phone number already exists.'
+            );
+        }
+
+        if (
+            $email !== null &&
+            $userModel->findByEmail($email) !== null
+        ) {
+            throw new RuntimeException(
+                'A user with this email address already exists.'
+            );
+        }
+
+        $user = $userModel->create(
+            $fullName,
+            $phone,
+            $password,
+            $email
+        );
+
+        return [
+            'user' => $userModel->publicData($user),
+        ];
     }
 
     /**
-     * Authenticate a user using phone number and password.
+     * Authenticate a user and create a session.
      *
      * @return array<string, mixed>
      */
@@ -109,7 +134,10 @@ final class AuthService
             );
         }
 
-        $user = User::findByPhone($phone);
+        $database = Database::connection();
+        $userModel = new User($database);
+
+        $user = $userModel->findForAuthentication($phone);
 
         if ($user === null) {
             throw new RuntimeException(
@@ -123,100 +151,41 @@ final class AuthService
             );
         }
 
-        $passwordHash = $user['password_hash'] ?? null;
-
         if (
-            !is_string($passwordHash) ||
-            $passwordHash === ''
+            !$userModel->verifyPassword(
+                $user,
+                $password
+            )
         ) {
-            throw new RuntimeException(
-                'This account does not have a password configured.'
-            );
-        }
-
-        if (!User::verifyPassword($password, $passwordHash)) {
             throw new RuntimeException(
                 'Invalid phone number or password.'
             );
         }
 
-        $token = self::generateToken();
-
-        self::createSession(
-            (string) $user['id'],
-            $token,
-            $deviceName
+        $token = bin2hex(
+            random_bytes(32)
         );
 
-        unset($user['password_hash']);
+        $expiresIn = self::sessionLifetime();
+
+        self::createSession(
+            $database,
+            (string) $user['id'],
+            $token,
+            $deviceName,
+            $expiresIn
+        );
 
         return [
-            'user' => $user,
+            'user' => $userModel->publicData($user),
             'token' => $token,
             'token_type' => 'Bearer',
-            'expires_in' => self::sessionLifetime(),
+            'expires_in' => $expiresIn,
         ];
     }
 
     /**
-     * Create a persistent authentication session.
-     */
-    public static function createSession(
-        string $userId,
-        string $token,
-        ?string $deviceName = null
-    ): void {
-        if ($userId === '') {
-            throw new RuntimeException(
-                'User ID is required.'
-            );
-        }
-
-        if ($token === '') {
-            throw new RuntimeException(
-                'Authentication token is required.'
-            );
-        }
-
-        $tokenHash = hash('sha256', $token);
-
-        $database = Database::connection();
-
-        $statement = $database->prepare(
-            '
-            INSERT INTO user_sessions (
-                user_id,
-                token_hash,
-                device_name,
-                ip_address,
-                user_agent,
-                expires_at,
-                last_used_at
-            )
-            VALUES (
-                :user_id,
-                :token_hash,
-                :device_name,
-                :ip_address,
-                :user_agent,
-                NOW() + (:lifetime * INTERVAL \'1 second\'),
-                NOW()
-            )
-            '
-        );
-
-        $statement->execute([
-            ':user_id' => $userId,
-            ':token_hash' => $tokenHash,
-            ':device_name' => $deviceName,
-            ':ip_address' => self::clientIp(),
-            ':user_agent' => self::userAgent(),
-            ':lifetime' => self::sessionLifetime(),
-        ]);
-    }
-
-    /**
-     * Retrieve the authenticated user from a bearer token.
+     * Resolve an authenticated user from a session token.
      *
      * @return array<string, mixed>|null
      */
@@ -229,13 +198,15 @@ final class AuthService
             return null;
         }
 
-        $tokenHash = hash('sha256', $token);
+        $tokenHash = hash(
+            'sha256',
+            $token
+        );
 
         $database = Database::connection();
 
         $statement = $database->prepare(
-            '
-            SELECT
+            'SELECT
                 u.id,
                 u.full_name,
                 u.phone,
@@ -244,28 +215,40 @@ final class AuthService
                 u.phone_verified_at,
                 u.is_active,
                 u.created_at,
-                u.updated_at
-            FROM user_sessions AS s
-            INNER JOIN users AS u
+                u.updated_at,
+                s.id AS session_id
+             FROM user_sessions AS s
+             INNER JOIN users AS u
                 ON u.id = s.user_id
-            WHERE s.token_hash = :token_hash
-              AND s.expires_at > NOW()
-              AND u.is_active = TRUE
-            LIMIT 1
-            '
+             WHERE s.token_hash = :token_hash
+               AND s.expires_at > NOW()
+               AND u.is_active = TRUE
+             LIMIT 1'
         );
 
         $statement->execute([
-            ':token_hash' => $tokenHash,
+            'token_hash' => $tokenHash,
         ]);
 
-        $user = $statement->fetch();
+        $user = $statement->fetch(PDO::FETCH_ASSOC);
 
         if (!is_array($user)) {
             return null;
         }
 
-        self::touchSession($tokenHash);
+        $sessionId = (string) $user['session_id'];
+
+        $update = $database->prepare(
+            'UPDATE user_sessions
+             SET last_used_at = NOW()
+             WHERE id = :id'
+        );
+
+        $update->execute([
+            'id' => $sessionId,
+        ]);
+
+        unset($user['session_id']);
 
         return $user;
     }
@@ -281,67 +264,111 @@ final class AuthService
             return false;
         }
 
-        $tokenHash = hash('sha256', $token);
+        $tokenHash = hash(
+            'sha256',
+            $token
+        );
 
         $database = Database::connection();
 
         $statement = $database->prepare(
-            '
-            DELETE FROM user_sessions
-            WHERE token_hash = :token_hash
-            '
+            'DELETE FROM user_sessions
+             WHERE token_hash = :token_hash'
         );
 
         $statement->execute([
-            ':token_hash' => $tokenHash,
+            'token_hash' => $tokenHash,
         ]);
 
-        return $statement->rowCount() === 1;
+        return $statement->rowCount() > 0;
     }
 
     /**
-     * Generate a cryptographically secure authentication token.
+     * Create a persistent authentication session.
      */
-    private static function generateToken(): string
-    {
-        return bin2hex(random_bytes(32));
-    }
-
-    /**
-     * Update the last-used timestamp for a session.
-     */
-    private static function touchSession(
-        string $tokenHash
+    private static function createSession(
+        PDO $database,
+        string $userId,
+        string $token,
+        ?string $deviceName,
+        int $expiresIn
     ): void {
-        $database = Database::connection();
+        $tokenHash = hash(
+            'sha256',
+            $token
+        );
+
+        $deviceName = $deviceName !== null
+            ? trim($deviceName)
+            : null;
+
+        if (
+            $deviceName !== null &&
+            $deviceName === ''
+        ) {
+            $deviceName = null;
+        }
+
+        if (
+            $deviceName !== null &&
+            mb_strlen($deviceName) > 150
+        ) {
+            $deviceName = mb_substr(
+                $deviceName,
+                0,
+                150
+            );
+        }
 
         $statement = $database->prepare(
-            '
-            UPDATE user_sessions
-            SET last_used_at = NOW()
-            WHERE token_hash = :token_hash
-            '
+            'INSERT INTO user_sessions (
+                user_id,
+                token_hash,
+                device_name,
+                ip_address,
+                user_agent,
+                expires_at,
+                last_used_at
+             )
+             VALUES (
+                :user_id,
+                :token_hash,
+                :device_name,
+                :ip_address,
+                :user_agent,
+                NOW() + (:expires_in * INTERVAL \'1 second\'),
+                NOW()
+             )'
         );
 
         $statement->execute([
-            ':token_hash' => $tokenHash,
+            'user_id' => $userId,
+            'token_hash' => $tokenHash,
+            'device_name' => $deviceName,
+            'ip_address' => self::clientIp(),
+            'user_agent' => self::userAgent(),
+            'expires_in' => $expiresIn,
         ]);
     }
 
     /**
-     * Return configured session lifetime in seconds.
+     * Get configured session lifetime.
      */
     private static function sessionLifetime(): int
     {
+        $value = $_ENV['SESSION_LIFETIME']
+            ?? '86400';
+
         $lifetime = filter_var(
-            $_ENV['SESSION_LIFETIME'] ?? 86400,
+            $value,
             FILTER_VALIDATE_INT
         );
 
-        if ($lifetime === false || $lifetime < 300) {
-            throw new RuntimeException(
-                'Invalid session lifetime configuration.'
-            );
+        if (
+            $lifetime === false ||
+            $lifetime < 300
+        ) {
+            return 86400;
         }
 
         return $lifetime;
@@ -354,9 +381,18 @@ final class AuthService
     {
         $ip = $_SERVER['REMOTE_ADDR'] ?? null;
 
-        return is_string($ip) && $ip !== ''
-            ? $ip
-            : null;
+        if (
+            !is_string($ip) ||
+            $ip === '' ||
+            filter_var(
+                $ip,
+                FILTER_VALIDATE_IP
+            ) === false
+        ) {
+            return null;
+        }
+
+        return $ip;
     }
 
     /**
@@ -364,11 +400,21 @@ final class AuthService
      */
     private static function userAgent(): ?string
     {
-        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+        $userAgent = $_SERVER['HTTP_USER_AGENT']
+            ?? null;
 
-        return is_string($userAgent) && $userAgent !== ''
-            ? substr($userAgent, 0, 1000)
-            : null;
+        if (
+            !is_string($userAgent) ||
+            $userAgent === ''
+        ) {
+            return null;
+        }
+
+        return mb_substr(
+            $userAgent,
+            0,
+            1000
+        );
     }
 
     private function __construct()
