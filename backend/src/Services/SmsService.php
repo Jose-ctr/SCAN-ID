@@ -11,47 +11,27 @@ final class SmsService
     /**
      * Send an SMS through Africa's Talking.
      *
-     * IMPORTANT:
-     * - API credentials must remain server-side.
-     * - Provider responses are never returned in full.
-     * - Provider/network errors are not exposed to API clients.
+     * The provider response is never exposed to the caller.
      */
-    public static function send(
-        string $phone,
-        string $message
-    ): array {
-        $phone = trim($phone);
+    public static function send(string $phone, string $message): array
+    {
+        $phone = self::normalizePhone($phone);
+
         $message = trim($message);
 
-        if ($phone === '') {
-            throw new RuntimeException(
-                'Recipient phone number is required.'
-            );
-        }
-
         if ($message === '') {
+            throw new RuntimeException('SMS message cannot be empty.');
+        }
+
+        if (mb_strlen($message) > 480) {
             throw new RuntimeException(
-                'SMS message is required.'
+                'SMS message exceeds the maximum supported length.'
             );
         }
 
-        if (mb_strlen($message) > 1600) {
-            throw new RuntimeException(
-                'SMS message is too long.'
-            );
-        }
-
-        $username = trim(
-            (string) ($_ENV['AT_USERNAME'] ?? '')
-        );
-
-        $apiKey = trim(
-            (string) ($_ENV['AT_API_KEY'] ?? '')
-        );
-
-        $senderId = trim(
-            (string) ($_ENV['AT_SENDER_ID'] ?? 'SCAN-ID')
-        );
+        $username = trim((string) ($_ENV['AFRICASTALKING_USERNAME'] ?? ''));
+        $apiKey = trim((string) ($_ENV['AFRICASTALKING_API_KEY'] ?? ''));
+        $senderId = trim((string) ($_ENV['AFRICASTALKING_SENDER_ID'] ?? 'SCAN-ID'));
 
         if ($username === '') {
             throw new RuntimeException(
@@ -71,25 +51,15 @@ final class SmsService
             );
         }
 
-        if (!function_exists('curl_init')) {
-            throw new RuntimeException(
-                'PHP cURL extension is required for SMS delivery.'
-            );
-        }
-
         $environment = strtolower(
-            trim(
-                (string) (
-                    $_ENV['APP_ENV'] ?? 'local'
-                )
-            )
+            trim((string) ($_ENV['APP_ENV'] ?? 'local'))
         );
 
         $endpoint = $environment === 'production'
             ? 'https://api.africastalking.com/version1/messaging'
             : 'https://api.sandbox.africastalking.com/version1/messaging';
 
-        $payload = http_build_query(
+        $postFields = http_build_query(
             [
                 'username' => $username,
                 'to' => $phone,
@@ -104,16 +74,14 @@ final class SmsService
         $curl = curl_init($endpoint);
 
         if ($curl === false) {
-            throw new RuntimeException(
-                'Unable to initialize SMS connection.'
-            );
+            throw new RuntimeException('Unable to initialize SMS provider.');
         }
 
         curl_setopt_array(
             $curl,
             [
                 CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => $payload,
+                CURLOPT_POSTFIELDS => $postFields,
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_HTTPHEADER => [
                     'Accept: application/json',
@@ -121,114 +89,158 @@ final class SmsService
                     'apiKey: ' . $apiKey,
                 ],
                 CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_TIMEOUT => 30,
+                CURLOPT_TIMEOUT => 20,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
             ]
         );
 
         $responseBody = curl_exec($curl);
-
-        $httpStatus = (int) curl_getinfo(
-            $curl,
-            CURLINFO_HTTP_CODE
-        );
-
         $curlError = curl_error($curl);
+        $httpCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
 
         curl_close($curl);
 
         if ($responseBody === false) {
-            /*
-             * Do not expose the provider's internal error to
-             * the API client. Logging can be added later.
-             */
-            unset($curlError);
-
             throw new RuntimeException(
-                'SMS provider connection failed.'
+                'SMS provider request failed.'
+                . ($curlError !== '' ? ' ' . $curlError : '')
             );
         }
 
-        $response = json_decode(
-            $responseBody,
-            true
-        );
-
-        if (!is_array($response)) {
-            throw new RuntimeException(
-                'SMS provider returned an invalid response.'
-            );
-        }
-
-        if ($httpStatus < 200 || $httpStatus >= 300) {
+        if ($httpCode < 200 || $httpCode >= 300) {
             throw new RuntimeException(
                 'SMS provider rejected the request.'
             );
         }
 
-        $recipient = $response['SMSMessageData']['Recipients'][0]
-            ?? null;
-
-        if (!is_array($recipient)) {
+        try {
+            $response = json_decode(
+                $responseBody,
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            );
+        } catch (\JsonException) {
             throw new RuntimeException(
-                'SMS provider did not return delivery information.'
+                'SMS provider returned an invalid response.'
             );
         }
 
-        $status = trim(
-            (string) (
-                $recipient['status'] ?? ''
-            )
+        if (!is_array($response)) {
+            throw new RuntimeException(
+                'SMS provider returned an unexpected response.'
+            );
+        }
+
+        $recipients = $response['SMSMessageData']['Recipients'] ?? null;
+
+        if (!is_array($recipients) || count($recipients) === 0) {
+            throw new RuntimeException(
+                'SMS provider did not confirm the recipient.'
+            );
+        }
+
+        $recipient = $recipients[0];
+
+        if (!is_array($recipient)) {
+            throw new RuntimeException(
+                'SMS provider returned invalid recipient data.'
+            );
+        }
+
+        $status = strtolower(
+            trim((string) ($recipient['status'] ?? ''))
         );
 
         if ($status === '') {
-            $status = 'Unknown';
+            throw new RuntimeException(
+                'SMS provider did not return a delivery status.'
+            );
         }
 
+        $messageId = isset($recipient['messageId'])
+            ? trim((string) $recipient['messageId'])
+            : null;
+
+        $number = isset($recipient['number'])
+            ? trim((string) $recipient['number'])
+            : $phone;
+
         return [
-            'phone' => $phone,
+            'success' => in_array(
+                $status,
+                ['sent', 'submitted', 'queued'],
+                true
+            ),
+            'phone' => $number,
             'status' => $status,
-            'message_id' => isset($recipient['messageId'])
-                ? (string) $recipient['messageId']
-                : null,
-            'cost' => isset($recipient['cost'])
-                ? (string) $recipient['cost']
-                : null,
+            'message_id' => $messageId !== '' ? $messageId : null,
         ];
     }
 
     /**
-     * Send a phone verification OTP.
+     * Send a six-digit phone verification code.
      */
     public static function sendVerificationCode(
         string $phone,
-        string $otp
+        string $code,
+        int $expiresInMinutes = 10
     ): array {
-        $phone = trim($phone);
-        $otp = trim($otp);
-
-        if ($phone === '') {
+        if (!preg_match('/^\d{6}$/', $code)) {
             throw new RuntimeException(
-                'Recipient phone number is required.'
+                'Verification code must contain exactly 6 digits.'
             );
         }
 
-        if (!preg_match('/^\d{6}$/', $otp)) {
+        if ($expiresInMinutes < 1 || $expiresInMinutes > 60) {
             throw new RuntimeException(
-                'Invalid verification code.'
+                'Verification code expiry must be between 1 and 60 minutes.'
             );
         }
 
         $message = sprintf(
-            'SCAN-ID verification code: %s. '
-            . 'It expires in 10 minutes. '
-            . 'Do not share this code with anyone.',
-            $otp
+            'SCAN-ID verification code: %s. This code expires in %d minutes. Do not share it with anyone.',
+            $code,
+            $expiresInMinutes
         );
 
-        return self::send(
-            $phone,
-            $message
-        );
+        return self::send($phone, $message);
+    }
+
+    /**
+     * Normalize Kenyan mobile numbers to 254XXXXXXXXX.
+     */
+    public static function normalizePhone(string $phone): string
+    {
+        $phone = trim($phone);
+
+        if ($phone === '') {
+            throw new RuntimeException('Phone number is required.');
+        }
+
+        $phone = preg_replace('/[\s().-]+/', '', $phone);
+
+        if ($phone === null) {
+            throw new RuntimeException('Invalid phone number.');
+        }
+
+        if (str_starts_with($phone, '+254')) {
+            $phone = substr($phone, 1);
+        } elseif (str_starts_with($phone, '07')) {
+            $phone = '254' . substr($phone, 1);
+        } elseif (str_starts_with($phone, '01')) {
+            $phone = '254' . substr($phone, 1);
+        }
+
+        if (!preg_match('/^254(?:7\d{8}|1\d{8})$/', $phone)) {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        return $phone;
     }
 
     private function __construct()
