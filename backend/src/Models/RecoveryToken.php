@@ -4,99 +4,73 @@ declare(strict_types=1);
 
 namespace ScanId\Models;
 
+use DateTimeImmutable;
 use PDO;
 use RuntimeException;
 
 final class RecoveryToken
 {
+    private const TOKEN_BYTES = 32;
+
     public function __construct(
-        private readonly PDO $database
+        private readonly PDO $db
     ) {
     }
 
     /**
-     * Create a secure recovery token.
+     * Create a secure recovery or handover token.
      *
-     * The plain token is returned once to the caller.
+     * The raw token is returned once to the caller.
      * Only its SHA-256 hash is stored in the database.
+     *
+     * @return array{
+     *     id: string,
+     *     token: string,
+     *     token_type: string,
+     *     expires_at: string
+     * }
      */
     public function create(
         string $recoveryRequestId,
         string $tokenType = 'recovery',
         int $expiresInSeconds = 1800
     ): array {
-        $recoveryRequestId = trim($recoveryRequestId);
-        $tokenType = trim($tokenType);
+        $this->validateTokenType($tokenType);
 
-        if ($recoveryRequestId === '') {
+        if ($expiresInSeconds < 60) {
             throw new RuntimeException(
-                'Recovery request ID is required.'
+                'Recovery token expiration must be at least 60 seconds.'
             );
         }
 
-        if (!in_array(
-            $tokenType,
-            ['recovery', 'handover'],
-            true
-        )) {
-            throw new RuntimeException(
-                'Invalid recovery token type.'
-            );
-        }
+        $this->assertRecoveryRequestExists($recoveryRequestId);
 
-        if ($expiresInSeconds < 300) {
-            throw new RuntimeException(
-                'Token expiry must be at least 5 minutes.'
-            );
-        }
+        $token = bin2hex(random_bytes(self::TOKEN_BYTES));
+        $tokenHash = self::hashToken($token);
 
-        $this->assertRecoveryRequestExists(
-            $recoveryRequestId
+        $expiresAt = new DateTimeImmutable(
+            '+' . $expiresInSeconds . ' seconds'
         );
 
-        /*
-         * Generate a high-entropy URL-safe token.
-         * 32 random bytes = 256 bits of entropy.
-         */
-        $plainToken = rtrim(
-            strtr(
-                base64_encode(
-                    random_bytes(32)
-                ),
-                '+/',
-                '-_'
-            ),
-            '='
-        );
-
-        $tokenHash = hash(
-            'sha256',
-            $plainToken
-        );
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            INSERT INTO recovery_tokens (
-                recovery_request_id,
-                token_hash,
-                token_type,
-                expires_at
-            )
-            VALUES (
-                :recovery_request_id,
-                :token_hash,
-                :token_type,
-                NOW() + (
-                    :expires_in_seconds
-                    * INTERVAL '1 second'
+                INSERT INTO recovery_tokens (
+                    recovery_request_id,
+                    token_hash,
+                    token_type,
+                    expires_at
                 )
-            )
-            RETURNING
-                id,
-                recovery_request_id,
-                token_type,
-                expires_at,
-                created_at
+                VALUES (
+                    :recovery_request_id,
+                    :token_hash,
+                    :token_type,
+                    :expires_at
+                )
+                RETURNING
+                    id,
+                    token_type,
+                    expires_at,
+                    created_at
             SQL
         );
 
@@ -104,57 +78,47 @@ final class RecoveryToken
             'recovery_request_id' => $recoveryRequestId,
             'token_hash' => $tokenHash,
             'token_type' => $tokenType,
-            'expires_in_seconds' => $expiresInSeconds,
+            'expires_at' => $expiresAt->format('Y-m-d H:i:sP'),
         ]);
 
-        $token = $statement->fetch();
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        if (!is_array($token)) {
+        if ($row === false) {
             throw new RuntimeException(
-                'Unable to create recovery token.'
+                'Failed to create recovery token.'
             );
         }
 
-        /*
-         * The plain token is intentionally returned only here.
-         * It must never be stored in the database.
-         */
-        $token['token'] = $plainToken;
-
-        return $token;
+        return [
+            'id' => (string) $row['id'],
+            'token' => $token,
+            'token_type' => (string) $row['token_type'],
+            'expires_at' => (string) $row['expires_at'],
+        ];
     }
 
     /**
-     * Find a valid unused token using the plain token.
+     * Find a valid token using the raw token supplied by the client.
      *
-     * The database only receives the SHA-256 hash.
+     * Expired and used tokens are never returned.
      */
     public function findValid(
-        string $plainToken,
-        string $tokenType = 'recovery'
+        string $token,
+        ?string $tokenType = null
     ): ?array {
-        $plainToken = trim($plainToken);
-        $tokenType = trim($tokenType);
+        $token = trim($token);
 
-        if ($plainToken === '') {
+        if ($token === '') {
             return null;
         }
 
-        if (!in_array(
-            $tokenType,
-            ['recovery', 'handover'],
-            true
-        )) {
-            return null;
+        if ($tokenType !== null) {
+            $this->validateTokenType($tokenType);
         }
 
-        $tokenHash = hash(
-            'sha256',
-            $plainToken
-        );
+        $tokenHash = self::hashToken($token);
 
-        $statement = $this->database->prepare(
-            <<<'SQL'
+        $sql = <<<'SQL'
             SELECT
                 id,
                 recovery_request_id,
@@ -164,60 +128,37 @@ final class RecoveryToken
                 created_at
             FROM recovery_tokens
             WHERE token_hash = :token_hash
-              AND token_type = :token_type
               AND used_at IS NULL
               AND expires_at > NOW()
-            LIMIT 1
-            SQL
-        );
+        SQL;
 
-        $statement->execute([
+        $parameters = [
             'token_hash' => $tokenHash,
-            'token_type' => $tokenType,
-        ]);
+        ];
 
-        $token = $statement->fetch();
+        if ($tokenType !== null) {
+            $sql .= ' AND token_type = :token_type';
+            $parameters['token_type'] = $tokenType;
+        }
 
-        return is_array($token)
-            ? $token
-            : null;
+        $sql .= ' LIMIT 1';
+
+        $statement = $this->db->prepare($sql);
+        $statement->execute($parameters);
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Consume a token.
-     *
-     * This operation is protected by a transaction and row lock
-     * so the same token cannot be consumed twice concurrently.
+     * Find a token by its database ID.
      */
-    public function consume(
-        string $plainToken,
-        string $tokenType = 'recovery'
+    public function findById(
+        string $id
     ): ?array {
-        $plainToken = trim($plainToken);
-        $tokenType = trim($tokenType);
-
-        if ($plainToken === '') {
-            return null;
-        }
-
-        if (!in_array(
-            $tokenType,
-            ['recovery', 'handover'],
-            true
-        )) {
-            return null;
-        }
-
-        $tokenHash = hash(
-            'sha256',
-            $plainToken
-        );
-
-        $this->database->beginTransaction();
-
-        try {
-            $statement = $this->database->prepare(
-                <<<'SQL'
+        $statement = $this->db->prepare(
+            <<<'SQL'
                 SELECT
                     id,
                     recovery_request_id,
@@ -226,112 +167,8 @@ final class RecoveryToken
                     used_at,
                     created_at
                 FROM recovery_tokens
-                WHERE token_hash = :token_hash
-                  AND token_type = :token_type
-                  AND used_at IS NULL
-                  AND expires_at > NOW()
-                LIMIT 1
-                FOR UPDATE
-                SQL
-            );
-
-            $statement->execute([
-                'token_hash' => $tokenHash,
-                'token_type' => $tokenType,
-            ]);
-
-            $token = $statement->fetch();
-
-            if (!is_array($token)) {
-                $this->database->rollBack();
-
-                return null;
-            }
-
-            $update = $this->database->prepare(
-                <<<'SQL'
-                UPDATE recovery_tokens
-                SET used_at = NOW()
                 WHERE id = :id
-                  AND used_at IS NULL
-                SQL
-            );
-
-            $update->execute([
-                'id' => $token['id'],
-            ]);
-
-            if ($update->rowCount() !== 1) {
-                $this->database->rollBack();
-
-                return null;
-            }
-
-            $this->database->commit();
-
-            $token['used_at'] = date(
-                DATE_ATOM
-            );
-
-            return $token;
-        } catch (\Throwable $exception) {
-            if ($this->database->inTransaction()) {
-                $this->database->rollBack();
-            }
-
-            throw new RuntimeException(
-                'Unable to consume recovery token.',
-                0,
-                $exception
-            );
-        }
-    }
-
-    /**
-     * Revoke an unused token.
-     */
-    public function revoke(
-        string $plainToken
-    ): bool {
-        $plainToken = trim($plainToken);
-
-        if ($plainToken === '') {
-            return false;
-        }
-
-        $tokenHash = hash(
-            'sha256',
-            $plainToken
-        );
-
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            UPDATE recovery_tokens
-            SET used_at = NOW()
-            WHERE token_hash = :token_hash
-              AND used_at IS NULL
-            SQL
-        );
-
-        $statement->execute([
-            'token_hash' => $tokenHash,
-        ]);
-
-        return $statement->rowCount() > 0;
-    }
-
-    /**
-     * Confirm that the recovery request exists.
-     */
-    private function assertRecoveryRequestExists(
-        string $id
-    ): void {
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT 1
-            FROM recovery_requests
-            WHERE id = :id
-            LIMIT 1
+                LIMIT 1
             SQL
         );
 
@@ -339,9 +176,157 @@ final class RecoveryToken
             'id' => $id,
         ]);
 
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return $row !== false ? $row : null;
+    }
+
+    /**
+     * Find all tokens for a recovery request.
+     */
+    public function findByRecoveryRequest(
+        string $recoveryRequestId
+    ): array {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    recovery_request_id,
+                    token_type,
+                    expires_at,
+                    used_at,
+                    created_at
+                FROM recovery_tokens
+                WHERE recovery_request_id = :recovery_request_id
+                ORDER BY created_at DESC
+            SQL
+        );
+
+        $statement->execute([
+            'recovery_request_id' => $recoveryRequestId,
+        ]);
+
+        return $statement->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Mark a token as used.
+     *
+     * The operation is idempotent for an already-used token.
+     */
+    public function markUsed(
+        string $id
+    ): bool {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE recovery_tokens
+                SET used_at = COALESCE(used_at, NOW())
+                WHERE id = :id
+                RETURNING id
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Mark a raw token as used.
+     */
+    public function consume(
+        string $token,
+        ?string $tokenType = null
+    ): bool {
+        $validToken = $this->findValid($token, $tokenType);
+
+        if ($validToken === null) {
+            return false;
+        }
+
+        return $this->markUsed((string) $validToken['id']);
+    }
+
+    /**
+     * Check whether a raw token is valid.
+     */
+    public function isValid(
+        string $token,
+        ?string $tokenType = null
+    ): bool {
+        return $this->findValid($token, $tokenType) !== null;
+    }
+
+    /**
+     * Delete expired tokens.
+     *
+     * This is maintenance only. It does not affect active tokens.
+     */
+    public function deleteExpired(): int
+    {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                DELETE FROM recovery_tokens
+                WHERE expires_at <= NOW()
+                RETURNING id
+            SQL
+        );
+
+        $statement->execute();
+
+        return count($statement->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /**
+     * Hash a raw token for database lookup.
+     */
+    public static function hashToken(
+        string $token
+    ): string {
+        return hash('sha256', $token);
+    }
+
+    /**
+     * Validate supported token types.
+     */
+    private function validateTokenType(
+        string $tokenType
+    ): void {
+        if (!in_array(
+            $tokenType,
+            ['recovery', 'handover'],
+            true
+        )) {
+            throw new RuntimeException(
+                'Invalid recovery token type.'
+            );
+        }
+    }
+
+    /**
+     * Ensure the recovery request exists.
+     */
+    private function assertRecoveryRequestExists(
+        string $recoveryRequestId
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM recovery_requests
+                WHERE id = :id
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $recoveryRequestId,
+        ]);
+
         if ($statement->fetchColumn() === false) {
             throw new RuntimeException(
-                'Recovery request was not found.'
+                'Recovery request not found.'
             );
         }
     }
