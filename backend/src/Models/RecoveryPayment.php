@@ -9,33 +9,33 @@ use RuntimeException;
 
 final class RecoveryPayment
 {
+    private const RECOVERY_AMOUNT_KES = 300;
+
     public function __construct(
         private readonly PDO $database
     ) {
     }
 
     /**
-     * Create a pending recovery payment.
+     * Create a pending KSh 300 recovery payment.
      *
-     * The actual M-Pesa request is handled by a service.
+     * The payment service is responsible for initiating
+     * the actual M-Pesa STK Push.
+     *
+     * KSh 300 total:
+     * - KSh 150 finder reward
+     * - KSh 150 SCAN-ID platform
      */
     public function create(
         string $recoveryRequestId,
-        int $amountKes,
         string $phone
     ): array {
         $recoveryRequestId = trim($recoveryRequestId);
-        $phone = trim($phone);
+        $phone = $this->normalizePhone($phone);
 
         if ($recoveryRequestId === '') {
             throw new RuntimeException(
                 'Recovery request ID is required.'
-            );
-        }
-
-        if ($amountKes < 0) {
-            throw new RuntimeException(
-                'Payment amount cannot be negative.'
             );
         }
 
@@ -45,15 +45,17 @@ final class RecoveryPayment
             );
         }
 
-        if (mb_strlen($phone) > 30) {
-            throw new RuntimeException(
-                'Payment phone number is too long.'
-            );
-        }
-
         $this->assertRecoveryRequestExists(
             $recoveryRequestId
         );
+
+        $existing = $this->findPendingByRecoveryRequest(
+            $recoveryRequestId
+        );
+
+        if ($existing !== null) {
+            return $existing;
+        }
 
         $statement = $this->database->prepare(
             <<<'SQL'
@@ -78,7 +80,7 @@ final class RecoveryPayment
                 provider,
                 checkout_request_id,
                 merchant_request_id,
-                mpesa_receipt,
+                mpesa_receipt_number,
                 phone,
                 status,
                 result_code,
@@ -91,11 +93,11 @@ final class RecoveryPayment
 
         $statement->execute([
             'recovery_request_id' => $recoveryRequestId,
-            'amount_kes' => $amountKes,
+            'amount_kes' => self::RECOVERY_AMOUNT_KES,
             'phone' => $phone,
         ]);
 
-        $payment = $statement->fetch();
+        $payment = $statement->fetch(PDO::FETCH_ASSOC);
 
         if (!is_array($payment)) {
             throw new RuntimeException(
@@ -127,7 +129,7 @@ final class RecoveryPayment
                 provider,
                 checkout_request_id,
                 merchant_request_id,
-                mpesa_receipt,
+                mpesa_receipt_number,
                 phone,
                 status,
                 result_code,
@@ -145,7 +147,7 @@ final class RecoveryPayment
             'id' => $id,
         ]);
 
-        $payment = $statement->fetch();
+        $payment = $statement->fetch(PDO::FETCH_ASSOC);
 
         return is_array($payment)
             ? $payment
@@ -153,7 +155,7 @@ final class RecoveryPayment
     }
 
     /**
-     * Find a payment belonging to a recovery request.
+     * Find the latest payment for a recovery request.
      */
     public function findByRecoveryRequest(
         string $recoveryRequestId
@@ -175,7 +177,7 @@ final class RecoveryPayment
                 provider,
                 checkout_request_id,
                 merchant_request_id,
-                mpesa_receipt,
+                mpesa_receipt_number,
                 phone,
                 status,
                 result_code,
@@ -194,7 +196,7 @@ final class RecoveryPayment
             'recovery_request_id' => $recoveryRequestId,
         ]);
 
-        $payment = $statement->fetch();
+        $payment = $statement->fetch(PDO::FETCH_ASSOC);
 
         return is_array($payment)
             ? $payment
@@ -202,7 +204,57 @@ final class RecoveryPayment
     }
 
     /**
-     * Store M-Pesa checkout identifiers.
+     * Find an existing pending payment.
+     */
+    public function findPendingByRecoveryRequest(
+        string $recoveryRequestId
+    ): ?array {
+        $recoveryRequestId = trim(
+            $recoveryRequestId
+        );
+
+        if ($recoveryRequestId === '') {
+            return null;
+        }
+
+        $statement = $this->database->prepare(
+            <<<'SQL'
+            SELECT
+                id,
+                recovery_request_id,
+                amount_kes,
+                provider,
+                checkout_request_id,
+                merchant_request_id,
+                mpesa_receipt_number,
+                phone,
+                status,
+                result_code,
+                result_description,
+                paid_at,
+                created_at,
+                updated_at
+            FROM recovery_payments
+            WHERE recovery_request_id = :recovery_request_id
+              AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'recovery_request_id' => $recoveryRequestId,
+        ]);
+
+        $payment = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($payment)
+            ? $payment
+            : null;
+    }
+
+    /**
+     * Store M-Pesa STK Push identifiers.
      */
     public function setCheckoutDetails(
         string $id,
@@ -236,8 +288,9 @@ final class RecoveryPayment
             SET
                 checkout_request_id = :checkout_request_id,
                 merchant_request_id = :merchant_request_id,
-                updated_at = NOW()
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = :id
+              AND status = 'pending'
             SQL
         );
 
@@ -251,19 +304,67 @@ final class RecoveryPayment
     }
 
     /**
-     * Mark a payment as completed.
+     * Find a payment using an M-Pesa receipt number.
+     */
+    public function findByReceipt(
+        string $receiptNumber
+    ): ?array {
+        $receiptNumber = trim($receiptNumber);
+
+        if ($receiptNumber === '') {
+            return null;
+        }
+
+        $statement = $this->database->prepare(
+            <<<'SQL'
+            SELECT
+                id,
+                recovery_request_id,
+                amount_kes,
+                provider,
+                checkout_request_id,
+                merchant_request_id,
+                mpesa_receipt_number,
+                phone,
+                status,
+                result_code,
+                result_description,
+                paid_at,
+                created_at,
+                updated_at
+            FROM recovery_payments
+            WHERE mpesa_receipt_number = :receipt_number
+            LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'receipt_number' => $receiptNumber,
+        ]);
+
+        $payment = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($payment)
+            ? $payment
+            : null;
+    }
+
+    /**
+     * Mark payment as completed after a verified M-Pesa callback.
      *
-     * M-Pesa receipt is unique and prevents duplicate
-     * successful callback processing.
+     * Receipt numbers are unique in the database, providing
+     * an additional protection against duplicate callbacks.
      */
     public function markCompleted(
         string $id,
-        string $mpesaReceipt,
+        string $mpesaReceiptNumber,
         ?int $resultCode = 0,
         ?string $resultDescription = null
     ): bool {
         $id = trim($id);
-        $mpesaReceipt = trim($mpesaReceipt);
+        $mpesaReceiptNumber = trim(
+            $mpesaReceiptNumber
+        );
 
         if ($id === '') {
             throw new RuntimeException(
@@ -271,9 +372,26 @@ final class RecoveryPayment
             );
         }
 
-        if ($mpesaReceipt === '') {
+        if ($mpesaReceiptNumber === '') {
             throw new RuntimeException(
-                'M-Pesa receipt is required.'
+                'M-Pesa receipt number is required.'
+            );
+        }
+
+        $existing = $this->findByReceipt(
+            $mpesaReceiptNumber
+        );
+
+        if ($existing !== null) {
+            if (
+                (string) $existing['id'] === $id
+                && $existing['status'] === 'completed'
+            ) {
+                return true;
+            }
+
+            throw new RuntimeException(
+                'This M-Pesa receipt has already been processed.'
             );
         }
 
@@ -282,19 +400,22 @@ final class RecoveryPayment
             UPDATE recovery_payments
             SET
                 status = 'completed',
-                mpesa_receipt = :mpesa_receipt,
+                mpesa_receipt_number = :mpesa_receipt_number,
                 result_code = :result_code,
                 result_description = :result_description,
-                paid_at = COALESCE(paid_at, NOW()),
-                updated_at = NOW()
+                paid_at = COALESCE(
+                    paid_at,
+                    CURRENT_TIMESTAMP
+                ),
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = :id
-              AND status <> 'completed'
+              AND status = 'pending'
             SQL
         );
 
         $statement->execute([
             'id' => $id,
-            'mpesa_receipt' => $mpesaReceipt,
+            'mpesa_receipt_number' => $mpesaReceiptNumber,
             'result_code' => $resultCode,
             'result_description' => $resultDescription,
         ]);
@@ -303,7 +424,7 @@ final class RecoveryPayment
     }
 
     /**
-     * Mark a payment as failed.
+     * Mark a pending payment as failed.
      */
     public function markFailed(
         string $id,
@@ -325,7 +446,7 @@ final class RecoveryPayment
                 status = 'failed',
                 result_code = :result_code,
                 result_description = :result_description,
-                updated_at = NOW()
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = :id
               AND status = 'pending'
             SQL
@@ -341,7 +462,7 @@ final class RecoveryPayment
     }
 
     /**
-     * Mark a payment as cancelled.
+     * Cancel a pending payment.
      */
     public function markCancelled(
         string $id
@@ -359,7 +480,7 @@ final class RecoveryPayment
             UPDATE recovery_payments
             SET
                 status = 'cancelled',
-                updated_at = NOW()
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = :id
               AND status = 'pending'
             SQL
@@ -373,19 +494,48 @@ final class RecoveryPayment
     }
 
     /**
-     * Check whether a payment has already completed.
+     * Check whether a recovery request has a completed payment.
      */
     public function isCompleted(
-        string $id
+        string $recoveryRequestId
     ): bool {
-        $payment = $this->findById($id);
+        $recoveryRequestId = trim(
+            $recoveryRequestId
+        );
 
-        return $payment !== null
-            && $payment['status'] === 'completed';
+        if ($recoveryRequestId === '') {
+            return false;
+        }
+
+        $statement = $this->database->prepare(
+            <<<'SQL'
+            SELECT 1
+            FROM recovery_payments
+            WHERE recovery_request_id = :recovery_request_id
+              AND status = 'completed'
+            LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'recovery_request_id' => $recoveryRequestId,
+        ]);
+
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Confirm that the recovery request exists.
+     * Verify that the payment amount is the locked
+     * SCAN-ID recovery amount.
+     */
+    public function isCorrectAmount(
+        int $amountKes
+    ): bool {
+        return $amountKes === self::RECOVERY_AMOUNT_KES;
+    }
+
+    /**
+     * Verify that the recovery request exists.
      */
     private function assertRecoveryRequestExists(
         string $id
@@ -408,5 +558,42 @@ final class RecoveryPayment
                 'Recovery request was not found.'
             );
         }
+    }
+
+    /**
+     * Normalize Kenyan phone numbers.
+     */
+    private function normalizePhone(
+        string $phone
+    ): string {
+        $phone = trim($phone);
+
+        if ($phone === '') {
+            return '';
+        }
+
+        $phone = preg_replace(
+            '/[\s\-\(\)]/',
+            '',
+            $phone
+        ) ?? '';
+
+        if (str_starts_with($phone, '00')) {
+            $phone = '+' . substr($phone, 2);
+        }
+
+        if (str_starts_with($phone, '0')) {
+            $phone = '+254' . substr($phone, 1);
+        } elseif (str_starts_with($phone, '254')) {
+            $phone = '+' . $phone;
+        }
+
+        if (!preg_match('/^\+2547\d{8}$/', $phone)) {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        return $phone;
     }
 }
