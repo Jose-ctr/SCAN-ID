@@ -10,116 +10,75 @@ use RuntimeException;
 final class Handover
 {
     public function __construct(
-        private readonly PDO $database
+        private readonly PDO $db
     ) {
     }
 
     /**
      * Create a handover record for a recovery request.
+     *
+     * One recovery request can have only one handover.
      */
     public function create(
         string $recoveryRequestId,
-        string $safeLocation,
-        bool $finderConsent = false,
+        ?string $safeLocation = null,
         ?string $scheduledAt = null,
         ?string $notes = null
     ): array {
-        $recoveryRequestId = trim(
-            $recoveryRequestId
-        );
-        $safeLocation = trim($safeLocation);
+        $this->assertRecoveryRequestExists($recoveryRequestId);
 
-        $notes = $notes !== null
-            ? trim($notes)
-            : null;
+        $existing = $this->findByRecoveryRequest($recoveryRequestId);
 
-        if ($recoveryRequestId === '') {
-            throw new RuntimeException(
-                'Recovery request ID is required.'
-            );
+        if ($existing !== null) {
+            return $existing;
         }
 
-        if ($safeLocation === '') {
-            throw new RuntimeException(
-                'Safe handover location is required.'
-            );
-        }
-
-        if (mb_strlen($safeLocation) > 255) {
-            throw new RuntimeException(
-                'Safe handover location is too long.'
-            );
-        }
-
-        if (
-            $notes !== null
-            && mb_strlen($notes) > 2000
-        ) {
-            throw new RuntimeException(
-                'Handover notes are too long.'
-            );
-        }
-
-        $this->assertRecoveryRequestExists(
-            $recoveryRequestId
-        );
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            INSERT INTO handovers (
-                recovery_request_id,
-                finder_consent,
-                safe_location,
-                scheduled_at,
-                status,
-                notes
-            )
-            VALUES (
-                :recovery_request_id,
-                :finder_consent,
-                :safe_location,
-                :scheduled_at,
-                CASE
-                    WHEN :scheduled_at IS NULL
-                    THEN 'pending'
-                    ELSE 'scheduled'
-                END,
-                :notes
-            )
-            RETURNING
-                id,
-                recovery_request_id,
-                finder_consent,
-                safe_location,
-                scheduled_at,
-                completed_at,
-                status,
-                notes,
-                created_at,
-                updated_at
+                INSERT INTO handovers (
+                    recovery_request_id,
+                    safe_location,
+                    scheduled_at,
+                    status,
+                    notes
+                )
+                VALUES (
+                    :recovery_request_id,
+                    :safe_location,
+                    :scheduled_at,
+                    'pending',
+                    :notes
+                )
+                RETURNING
+                    id,
+                    recovery_request_id,
+                    finder_consent,
+                    safe_location,
+                    scheduled_at,
+                    completed_at,
+                    status,
+                    notes,
+                    created_at,
+                    updated_at
             SQL
         );
 
         $statement->execute([
             'recovery_request_id' => $recoveryRequestId,
-            'finder_consent' => $finderConsent,
-            'safe_location' => $safeLocation,
-            'scheduled_at' => $scheduledAt !== null
-                && $scheduledAt !== ''
-                ? $scheduledAt
-                : null,
-            'notes' => $notes,
+            'safe_location' => $this->nullableString($safeLocation),
+            'scheduled_at' => $this->nullableString($scheduledAt),
+            'notes' => $this->nullableString($notes),
         ]);
 
-        $handover = $statement->fetch();
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        if (!is_array($handover)) {
+        if ($row === false) {
             throw new RuntimeException(
-                'Unable to create handover record.'
+                'Failed to create handover.'
             );
         }
 
-        return $handover;
+        return $row;
     }
 
     /**
@@ -128,28 +87,22 @@ final class Handover
     public function findById(
         string $id
     ): ?array {
-        $id = trim($id);
-
-        if ($id === '') {
-            return null;
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            SELECT
-                id,
-                recovery_request_id,
-                finder_consent,
-                safe_location,
-                scheduled_at,
-                completed_at,
-                status,
-                notes,
-                created_at,
-                updated_at
-            FROM handovers
-            WHERE id = :id
-            LIMIT 1
+                SELECT
+                    id,
+                    recovery_request_id,
+                    finder_consent,
+                    safe_location,
+                    scheduled_at,
+                    completed_at,
+                    status,
+                    notes,
+                    created_at,
+                    updated_at
+                FROM handovers
+                WHERE id = :id
+                LIMIT 1
             SQL
         );
 
@@ -157,11 +110,9 @@ final class Handover
             'id' => $id,
         ]);
 
-        $handover = $statement->fetch();
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($handover)
-            ? $handover
-            : null;
+        return $row !== false ? $row : null;
     }
 
     /**
@@ -170,30 +121,22 @@ final class Handover
     public function findByRecoveryRequest(
         string $recoveryRequestId
     ): ?array {
-        $recoveryRequestId = trim(
-            $recoveryRequestId
-        );
-
-        if ($recoveryRequestId === '') {
-            return null;
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            SELECT
-                id,
-                recovery_request_id,
-                finder_consent,
-                safe_location,
-                scheduled_at,
-                completed_at,
-                status,
-                notes,
-                created_at,
-                updated_at
-            FROM handovers
-            WHERE recovery_request_id = :recovery_request_id
-            LIMIT 1
+                SELECT
+                    id,
+                    recovery_request_id,
+                    finder_consent,
+                    safe_location,
+                    scheduled_at,
+                    completed_at,
+                    status,
+                    notes,
+                    created_at,
+                    updated_at
+                FROM handovers
+                WHERE recovery_request_id = :recovery_request_id
+                LIMIT 1
             SQL
         );
 
@@ -201,34 +144,41 @@ final class Handover
             'recovery_request_id' => $recoveryRequestId,
         ]);
 
-        $handover = $statement->fetch();
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($handover)
-            ? $handover
-            : null;
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Record finder consent.
+     * Record finder consent for the handover.
      */
     public function grantFinderConsent(
         string $id
     ): bool {
-        $id = trim($id);
+        return $this->updateFinderConsent($id, true);
+    }
 
-        if ($id === '') {
-            throw new RuntimeException(
-                'Handover ID is required.'
-            );
-        }
+    /**
+     * Revoke finder consent.
+     */
+    public function revokeFinderConsent(
+        string $id
+    ): bool {
+        return $this->updateFinderConsent($id, false);
+    }
 
-        $statement = $this->database->prepare(
+    /**
+     * Check finder consent.
+     */
+    public function hasFinderConsent(
+        string $id
+    ): bool {
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE handovers
-            SET
-                finder_consent = TRUE,
-                updated_at = NOW()
-            WHERE id = :id
+                SELECT finder_consent
+                FROM handovers
+                WHERE id = :id
+                LIMIT 1
             SQL
         );
 
@@ -236,7 +186,16 @@ final class Handover
             'id' => $id,
         ]);
 
-        return $statement->rowCount() > 0;
+        $value = $statement->fetchColumn();
+
+        if ($value === false) {
+            return false;
+        }
+
+        return filter_var(
+            $value,
+            FILTER_VALIDATE_BOOLEAN
+        );
     }
 
     /**
@@ -244,161 +203,239 @@ final class Handover
      */
     public function schedule(
         string $id,
-        string $scheduledAt
+        string $scheduledAt,
+        ?string $safeLocation = null,
+        ?string $notes = null
     ): bool {
-        $id = trim($id);
-        $scheduledAt = trim($scheduledAt);
-
-        if ($id === '') {
-            throw new RuntimeException(
-                'Handover ID is required.'
-            );
-        }
-
-        if ($scheduledAt === '') {
-            throw new RuntimeException(
-                'Handover schedule is required.'
-            );
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE handovers
-            SET
-                scheduled_at = CAST(
-                    :scheduled_at AS TIMESTAMPTZ
-                ),
-                status = 'scheduled',
-                updated_at = NOW()
-            WHERE id = :id
-              AND status = 'pending'
+                UPDATE handovers
+                SET
+                    scheduled_at = :scheduled_at,
+                    safe_location = COALESCE(
+                        :safe_location,
+                        safe_location
+                    ),
+                    notes = COALESCE(
+                        :notes,
+                        notes
+                    ),
+                    status = 'scheduled'
+                WHERE id = :id
+                  AND status IN ('pending', 'scheduled')
+                RETURNING id
             SQL
         );
 
         $statement->execute([
             'id' => $id,
             'scheduled_at' => $scheduledAt,
+            'safe_location' => $this->nullableString($safeLocation),
+            'notes' => $this->nullableString($notes),
         ]);
 
-        return $statement->rowCount() > 0;
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Complete the physical handover.
+     * Mark the handover as completed.
      */
     public function complete(
         string $id,
         ?string $notes = null
     ): bool {
-        $id = trim($id);
-
-        $notes = $notes !== null
-            ? trim($notes)
-            : null;
-
-        if ($id === '') {
-            throw new RuntimeException(
-                'Handover ID is required.'
-            );
-        }
-
-        if (
-            $notes !== null
-            && mb_strlen($notes) > 2000
-        ) {
-            throw new RuntimeException(
-                'Handover notes are too long.'
-            );
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE handovers
-            SET
-                status = 'completed',
-                completed_at = COALESCE(
-                    completed_at,
-                    NOW()
-                ),
-                notes = COALESCE(
-                    :notes,
-                    notes
-                ),
-                updated_at = NOW()
-            WHERE id = :id
-              AND status IN (
-                  'pending',
-                  'scheduled'
-              )
+                UPDATE handovers
+                SET
+                    completed_at = COALESCE(
+                        completed_at,
+                        NOW()
+                    ),
+                    status = 'completed',
+                    notes = COALESCE(
+                        :notes,
+                        notes
+                    )
+                WHERE id = :id
+                  AND status IN ('pending', 'scheduled')
+                RETURNING id
             SQL
         );
 
         $statement->execute([
             'id' => $id,
-            'notes' => $notes,
+            'notes' => $this->nullableString($notes),
         ]);
 
-        return $statement->rowCount() > 0;
+        return $statement->fetchColumn() !== false;
     }
 
     /**
      * Cancel a handover.
      */
     public function cancel(
-        string $id
+        string $id,
+        ?string $notes = null
     ): bool {
-        $id = trim($id);
-
-        if ($id === '') {
-            throw new RuntimeException(
-                'Handover ID is required.'
-            );
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE handovers
-            SET
-                status = 'cancelled',
-                updated_at = NOW()
-            WHERE id = :id
-              AND status IN (
-                  'pending',
-                  'scheduled'
-              )
+                UPDATE handovers
+                SET
+                    status = 'cancelled',
+                    notes = COALESCE(
+                        :notes,
+                        notes
+                    )
+                WHERE id = :id
+                  AND status IN ('pending', 'scheduled')
+                RETURNING id
             SQL
         );
 
         $statement->execute([
             'id' => $id,
+            'notes' => $this->nullableString($notes),
         ]);
 
-        return $statement->rowCount() > 0;
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Confirm that the recovery request exists.
+     * Update the safe handover location.
      */
-    private function assertRecoveryRequestExists(
-        string $id
-    ): void {
-        $statement = $this->database->prepare(
+    public function updateSafeLocation(
+        string $id,
+        ?string $safeLocation
+    ): bool {
+        $statement = $this->db->prepare(
             <<<'SQL'
-            SELECT 1
-            FROM recovery_requests
-            WHERE id = :id
-            LIMIT 1
+                UPDATE handovers
+                SET safe_location = :safe_location
+                WHERE id = :id
+                  AND status IN ('pending', 'scheduled')
+                RETURNING id
             SQL
         );
 
         $statement->execute([
             'id' => $id,
+            'safe_location' => $this->nullableString($safeLocation),
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Update notes.
+     */
+    public function updateNotes(
+        string $id,
+        ?string $notes
+    ): bool {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE handovers
+                SET notes = :notes
+                WHERE id = :id
+                  AND status IN ('pending', 'scheduled')
+                RETURNING id
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+            'notes' => $this->nullableString($notes),
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Check whether the handover has been completed.
+     */
+    public function isCompleted(
+        string $recoveryRequestId
+    ): bool {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM handovers
+                WHERE recovery_request_id = :recovery_request_id
+                  AND status = 'completed'
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'recovery_request_id' => $recoveryRequestId,
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Ensure the recovery request exists.
+     */
+    private function assertRecoveryRequestExists(
+        string $recoveryRequestId
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM recovery_requests
+                WHERE id = :id
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $recoveryRequestId,
         ]);
 
         if ($statement->fetchColumn() === false) {
             throw new RuntimeException(
-                'Recovery request was not found.'
+                'Recovery request not found.'
             );
         }
+    }
+
+    /**
+     * Update finder consent.
+     */
+    private function updateFinderConsent(
+        string $id,
+        bool $consent
+    ): bool {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE handovers
+                SET finder_consent = :finder_consent
+                WHERE id = :id
+                RETURNING id
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+            'finder_consent' => $consent,
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Convert empty strings to NULL.
+     */
+    private function nullableString(
+        ?string $value
+    ): ?string {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
     }
 }
