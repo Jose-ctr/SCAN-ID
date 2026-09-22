@@ -12,16 +12,11 @@ use ScanId\Models\User;
 final class PhoneVerificationService
 {
     /**
-     * Create an OTP for an authenticated user's phone number.
+     * Send a phone verification code to an authenticated user.
      *
-     * @return array{
-     *     id: string,
-     *     phone: string,
-     *     otp: string,
-     *     expires_at: string
-     * }
+     * @return array<string, mixed>
      */
-    public static function createForUser(
+    public static function sendForUser(
         string $userId
     ): array {
         $userId = trim($userId);
@@ -39,7 +34,7 @@ final class PhoneVerificationService
 
         if ($user === null) {
             throw new RuntimeException(
-                'User account not found.'
+                'User account was not found.'
             );
         }
 
@@ -49,96 +44,161 @@ final class PhoneVerificationService
             );
         }
 
-        $phone = trim(
-            (string) ($user['phone'] ?? '')
-        );
+        $phone = (string) $user['phone'];
 
         if ($phone === '') {
             throw new RuntimeException(
-                'User phone number is not configured.'
+                'No phone number is attached to this account.'
             );
         }
 
-        return PhoneVerification::create(
-            $phone,
+        if (
+            !empty($user['phone_verified_at'])
+        ) {
+            return [
+                'status' => 'already_verified',
+                'message' => 'Phone number is already verified.',
+            ];
+        }
+
+        $verificationModel = new PhoneVerification(
+            $database
+        );
+
+        $verification = $verificationModel->createForUser(
             $userId
         );
+
+        $code = (string) $verification['code'];
+
+        $message = sprintf(
+            'SCAN-ID verification code: %s. '
+            . 'This code expires in 10 minutes. '
+            . 'Never share this code with anyone.',
+            $code
+        );
+
+        try {
+            $sms = SmsService::send(
+                $phone,
+                $message
+            );
+        } catch (\Throwable $exception) {
+            /*
+             * The OTP record remains server-side but is invalidated
+             * if delivery fails so that an undelivered code cannot
+             * later be used.
+             */
+            $verificationModel->invalidate(
+                (string) $verification['id']
+            );
+
+            throw new RuntimeException(
+                'Unable to send verification code.'
+            );
+        }
+
+        return [
+            'status' => 'sent',
+            'expires_at' => $verification['expires_at'],
+            'sms_status' => $sms['status'] ?? 'sent',
+        ];
     }
 
     /**
-     * Create an OTP directly for a phone number.
+     * Verify an authenticated user's OTP.
      *
-     * @return array{
-     *     id: string,
-     *     phone: string,
-     *     otp: string,
-     *     expires_at: string
-     * }
+     * @return array<string, mixed>
      */
-    public static function createForPhone(
-        string $phone
+    public static function verifyForUser(
+        string $userId,
+        string $code
     ): array {
-        $phone = trim($phone);
+        $userId = trim($userId);
+        $code = trim($code);
 
-        if ($phone === '') {
+        if ($userId === '') {
             throw new RuntimeException(
-                'Phone number is required.'
+                'User ID is required.'
+            );
+        }
+
+        if ($code === '') {
+            throw new RuntimeException(
+                'Verification code is required.'
+            );
+        }
+
+        if (!preg_match('/^\d{6}$/', $code)) {
+            throw new RuntimeException(
+                'Verification code must contain 6 digits.'
             );
         }
 
         $database = Database::connection();
         $userModel = new User($database);
 
-        $user = $userModel->findByPhone($phone);
+        $user = $userModel->findById($userId);
 
-        return PhoneVerification::create(
-            $phone,
-            $user['id'] ?? null
+        if ($user === null) {
+            throw new RuntimeException(
+                'User account was not found.'
+            );
+        }
+
+        if (!(bool) $user['is_active']) {
+            throw new RuntimeException(
+                'This account is inactive.'
+            );
+        }
+
+        if (!empty($user['phone_verified_at'])) {
+            return [
+                'verified' => true,
+                'message' => 'Phone number is already verified.',
+                'user' => $userModel->publicData($user),
+            ];
+        }
+
+        $verificationModel = new PhoneVerification(
+            $database
         );
+
+        /*
+         * The model performs the transactional OTP lookup,
+         * expiry check, attempt limiting and password_hash
+         * verification.
+         */
+        $verification = $verificationModel->verify(
+            (string) $user['phone'],
+            $code
+        );
+
+        if ($verification === null) {
+            throw new RuntimeException(
+                'Invalid or expired verification code.'
+            );
+        }
+
+        $updatedUser = $userModel->findById($userId);
+
+        if ($updatedUser === null) {
+            throw new RuntimeException(
+                'Unable to reload verified user account.'
+            );
+        }
+
+        return [
+            'verified' => true,
+            'message' => 'Phone number verified successfully.',
+            'user' => $userModel->publicData($updatedUser),
+        ];
     }
 
     /**
-     * Verify a submitted OTP.
-     *
-     * @return array<string, mixed>
+     * Check whether an authenticated user's phone is verified.
      */
-    public static function verify(
-        string $phone,
-        string $otp
-    ): array {
-        $phone = trim($phone);
-        $otp = trim($otp);
-
-        if ($phone === '') {
-            throw new RuntimeException(
-                'Phone number is required.'
-            );
-        }
-
-        if ($otp === '') {
-            throw new RuntimeException(
-                'Verification code is required.'
-            );
-        }
-
-        if (!preg_match('/^\d{6}$/', $otp)) {
-            throw new RuntimeException(
-                'Verification code must contain 6 digits.'
-            );
-        }
-
-        $verification = PhoneVerification::verify(
-            $phone,
-            $otp
-        );
-
-        return $verification;
-    }
-
-    /**
-     * Check whether a user's phone number is verified.
-     */
-    public static function isUserVerified(
+    public static function isVerified(
         string $userId
     ): bool {
         $userId = trim($userId);
@@ -150,9 +210,13 @@ final class PhoneVerificationService
         $database = Database::connection();
         $userModel = new User($database);
 
-        return $userModel->isPhoneVerified(
-            $userId
-        );
+        $user = $userModel->findById($userId);
+
+        if ($user === null) {
+            return false;
+        }
+
+        return !empty($user['phone_verified_at']);
     }
 
     private function __construct()
