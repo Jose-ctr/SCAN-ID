@@ -83,6 +83,10 @@ final class AuthService
         $database = Database::connection();
         $userModel = new User($database);
 
+        /*
+         * User::findByPhone() performs the same Kenyan
+         * phone normalization used by User::create().
+         */
         if ($userModel->findByPhone($phone) !== null) {
             throw new RuntimeException(
                 'A user with this phone number already exists.'
@@ -137,7 +141,11 @@ final class AuthService
         $database = Database::connection();
         $userModel = new User($database);
 
-        $user = $userModel->findForAuthentication($phone);
+        /*
+         * findByPhone() returns the password hash because it is
+         * the authentication lookup method in the current User model.
+         */
+        $user = $userModel->findByPhone($phone);
 
         if ($user === null) {
             throw new RuntimeException(
@@ -185,7 +193,10 @@ final class AuthService
     }
 
     /**
-     * Resolve an authenticated user from a session token.
+     * Resolve an authenticated user from a raw session token.
+     *
+     * The raw token is never stored in the database.
+     * Only its SHA-256 hash is stored in user_sessions.
      *
      * @return array<string, mixed>|null
      */
@@ -254,7 +265,7 @@ final class AuthService
     }
 
     /**
-     * Revoke an authentication session.
+     * Revoke the current authentication session.
      */
     public static function logout(string $token): bool
     {
@@ -284,7 +295,7 @@ final class AuthService
     }
 
     /**
-     * Create a persistent authentication session.
+     * Create a user session.
      */
     private static function createSession(
         PDO $database,
@@ -352,12 +363,11 @@ final class AuthService
     }
 
     /**
-     * Get configured session lifetime.
+     * Get configured authentication session lifetime.
      */
     private static function sessionLifetime(): int
     {
-        $value = $_ENV['SESSION_LIFETIME']
-            ?? '86400';
+        $value = $_ENV['SESSION_LIFETIME'] ?? '86400';
 
         $lifetime = filter_var(
             $value,
@@ -375,7 +385,7 @@ final class AuthService
     }
 
     /**
-     * Get the client IP address.
+     * Get the validated client IP address.
      */
     private static function clientIp(): ?string
     {
@@ -400,8 +410,7 @@ final class AuthService
      */
     private static function userAgent(): ?string
     {
-        $userAgent = $_SERVER['HTTP_USER_AGENT']
-            ?? null;
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
 
         if (
             !is_string($userAgent) ||
