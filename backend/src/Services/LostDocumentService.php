@@ -7,42 +7,83 @@ namespace ScanId\Services;
 use RuntimeException;
 use ScanId\Config\Database;
 use ScanId\Models\LostDocument;
+use ScanId\Models\User;
 
 final class LostDocumentService
 {
     /**
-     * Supported SCAN-ID document types.
-     */
-    private const DOCUMENT_TYPES = [
-        'national-id',
-        'passport',
-        'driving-licence',
-        'student-id',
-        'staff-id',
-        'bank-card',
-        'insurance-card',
-        'other',
-    ];
-
-    /**
-     * Create a lost-document report.
+     * Report a lost document.
      *
-     * The raw document number is accepted only for processing.
-     * It is immediately converted into a server-side HMAC hash.
+     * The owner may be authenticated or may report using
+     * their phone number.
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
      */
-    public static function createReport(
-        ?string $ownerUserId,
-        string $ownerPhone,
-        string $documentType,
-        string $documentNumber,
-        string $lostLocation,
-        ?string $lostAt = null
+    public static function report(
+        array $data,
+        ?string $userId = null
     ): array {
-        $ownerPhone = trim($ownerPhone);
-        $documentType = self::normalizeDocumentType(
-            $documentType
+        $documentType = trim(
+            (string) ($data['document_type'] ?? '')
         );
-        $lostLocation = trim($lostLocation);
+
+        $documentNumber = trim(
+            (string) ($data['document_number'] ?? '')
+        );
+
+        $ownerPhone = trim(
+            (string) ($data['owner_phone'] ?? '')
+        );
+
+        $location = isset($data['last_known_location_general'])
+            ? trim(
+                (string) $data['last_known_location_general']
+            )
+            : null;
+
+        $lostAt = isset($data['lost_at'])
+            ? trim((string) $data['lost_at'])
+            : null;
+
+        if ($documentType === '') {
+            throw new RuntimeException(
+                'Document type is required.'
+            );
+        }
+
+        if ($documentNumber === '') {
+            throw new RuntimeException(
+                'Document number is required.'
+            );
+        }
+
+        /*
+         * Authenticated users may use the phone number stored
+         * on their account. Anonymous reports must provide one.
+         */
+        $database = Database::connection();
+        $userModel = new User($database);
+
+        if ($userId !== null) {
+            $user = $userModel->findById($userId);
+
+            if ($user === null) {
+                throw new RuntimeException(
+                    'Authenticated user was not found.'
+                );
+            }
+
+            if (!(bool) $user['is_active']) {
+                throw new RuntimeException(
+                    'This account is inactive.'
+                );
+            }
+
+            if ($ownerPhone === '') {
+                $ownerPhone = (string) $user['phone'];
+            }
+        }
 
         if ($ownerPhone === '') {
             throw new RuntimeException(
@@ -50,60 +91,78 @@ final class LostDocumentService
             );
         }
 
-        if (strlen($ownerPhone) > 30) {
-            throw new RuntimeException(
-                'Owner phone number is too long.'
+        $documentType =
+            DocumentHashService::validateDocumentType(
+                $documentType
             );
-        }
 
-        if ($lostLocation === '') {
-            throw new RuntimeException(
-                'Lost location is required.'
+        $documentData =
+            DocumentHashService::prepare(
+                $documentNumber
             );
-        }
-
-        if (strlen($lostLocation) > 255) {
-            throw new RuntimeException(
-                'Lost location is too long.'
-            );
-        }
-
-        if ($ownerUserId !== null) {
-            $ownerUserId = trim($ownerUserId);
-
-            if ($ownerUserId === '') {
-                $ownerUserId = null;
-            }
-        }
 
         /*
-         * Never accept a document hash from the frontend.
+         * Do not create duplicate active lost-document reports
+         * for the same protected document identifier.
          */
-        $documentHash = DocumentHashService::hash(
-            $documentNumber
-        );
-
-        $documentLast4 = DocumentHashService::lastFour(
-            $documentNumber
-        );
-
-        $database = Database::connection();
-
         $model = new LostDocument($database);
 
-        return $model->create(
-            $ownerUserId,
+        $existing = $model->findByHash(
+            $documentData['document_number_hash']
+        );
+
+        if (
+            $existing !== null &&
+            $model->isActive($existing)
+        ) {
+            throw new RuntimeException(
+                'An active lost-document report already exists for this document.'
+            );
+        }
+
+        $document = $model->create(
+            $userId,
             $ownerPhone,
             $documentType,
-            $documentHash,
-            $documentLast4,
-            $lostLocation,
-            $lostAt
+            $documentNumber,
+            $location !== '' ? $location : null,
+            $lostAt !== '' ? $lostAt : null
         );
+
+        return $model->publicData($document);
     }
 
     /**
-     * Find a lost-document report by ID.
+     * Find a lost document using its protected document number.
+     *
+     * No raw document number is stored or returned.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function findByDocumentNumber(
+        string $documentNumber
+    ): ?array {
+        $hash =
+            DocumentHashService::hashDocumentNumber(
+                $documentNumber
+            );
+
+        $database = Database::connection();
+        $model = new LostDocument($database);
+
+        $document = $model->findByHash($hash);
+
+        if ($document === null) {
+            return null;
+        }
+
+        return $model->publicData($document);
+    }
+
+    /**
+     * Get a lost-document report by ID.
+     *
+     * @return array<string, mixed>|null
      */
     public static function findById(
         string $id
@@ -111,143 +170,232 @@ final class LostDocumentService
         $id = trim($id);
 
         if ($id === '') {
-            throw new RuntimeException(
-                'Lost document ID is required.'
-            );
+            return null;
         }
 
         $database = Database::connection();
-
         $model = new LostDocument($database);
 
-        return $model->findById($id);
+        $document = $model->findById($id);
+
+        if ($document === null) {
+            return null;
+        }
+
+        return $model->publicData($document);
     }
 
     /**
-     * Find potential found-document matches.
+     * Get the authenticated user's lost-document reports.
      *
-     * Matching is performed by the server using the same
-     * protected document hash.
+     * @return array<int, array<string, mixed>>
      */
-    public static function findMatches(
-        string $documentNumber,
-        ?string $documentType = null
+    public static function findByOwner(
+        string $userId
     ): array {
-        $documentHash = DocumentHashService::hash(
-            $documentNumber
-        );
+        $userId = trim($userId);
 
-        if ($documentType !== null) {
-            $documentType = self::normalizeDocumentType(
-                $documentType
+        if ($userId === '') {
+            throw new RuntimeException(
+                'User ID is required.'
             );
         }
 
         $database = Database::connection();
-
         $model = new LostDocument($database);
 
-        return $model->findMatches(
-            $documentHash,
-            $documentType
+        $documents = $model->findByOwnerUser($userId);
+
+        return array_map(
+            static fn(array $document): array =>
+                $model->publicData($document),
+            $documents
         );
     }
 
     /**
-     * Mark a report as matched.
+     * Cancel a lost-document report belonging to the user.
+     *
+     * @return array<string, mixed>
      */
-    public static function markMatched(
-        string $id
+    public static function cancel(
+        string $documentId,
+        string $userId
     ): array {
-        $model = self::model();
+        $documentId = trim($documentId);
+        $userId = trim($userId);
 
-        $result = $model->markMatched($id);
-
-        if ($result === null) {
+        if ($documentId === '' || $userId === '') {
             throw new RuntimeException(
-                'Lost document report not found.'
+                'Document ID and user ID are required.'
             );
         }
 
-        return $result;
-    }
+        $database = Database::connection();
+        $model = new LostDocument($database);
 
-    /**
-     * Mark a report as awaiting recovery.
-     */
-    public static function markRecoveryPending(
-        string $id
-    ): array {
-        $model = self::model();
+        $document = $model->findById($documentId);
 
-        $result = $model->markRecoveryPending($id);
-
-        if ($result === null) {
+        if ($document === null) {
             throw new RuntimeException(
-                'Lost document report not found.'
+                'Lost-document report not found.'
             );
         }
-
-        return $result;
-    }
-
-    /**
-     * Mark a report as recovered.
-     */
-    public static function markRecovered(
-        string $id
-    ): array {
-        $model = self::model();
-
-        $result = $model->markRecovered($id);
-
-        if ($result === null) {
-            throw new RuntimeException(
-                'Lost document report not found.'
-            );
-        }
-
-        return $result;
-    }
-
-    /**
-     * Normalize and validate document type.
-     */
-    public static function normalizeDocumentType(
-        string $documentType
-    ): string {
-        $documentType = strtolower(
-            trim($documentType)
-        );
 
         if (
-            !in_array(
-                $documentType,
-                self::DOCUMENT_TYPES,
-                true
-            )
+            (string) ($document['owner_user_id'] ?? '') !==
+            $userId
         ) {
             throw new RuntimeException(
-                'Unsupported document type.'
+                'You are not allowed to modify this report.'
             );
         }
 
-        return $documentType;
+        if (!$model->isActive($document)) {
+            throw new RuntimeException(
+                'This lost-document report is no longer active.'
+            );
+        }
+
+        $updated = $model->cancel($documentId);
+
+        if ($updated === null) {
+            throw new RuntimeException(
+                'Unable to cancel the lost-document report.'
+            );
+        }
+
+        return $model->publicData($updated);
     }
 
     /**
-     * Return supported document types.
+     * Mark a lost document as matched.
+     *
+     * This is called by the recovery matching workflow,
+     * not directly by an unauthenticated client.
+     *
+     * @return array<string, mixed>
      */
-    public static function documentTypes(): array
-    {
-        return self::DOCUMENT_TYPES;
+    public static function markMatched(
+        string $documentId
+    ): array {
+        $documentId = trim($documentId);
+
+        if ($documentId === '') {
+            throw new RuntimeException(
+                'Document ID is required.'
+            );
+        }
+
+        $database = Database::connection();
+        $model = new LostDocument($database);
+
+        $document = $model->findById($documentId);
+
+        if ($document === null) {
+            throw new RuntimeException(
+                'Lost-document report not found.'
+            );
+        }
+
+        if (!$model->isActive($document)) {
+            throw new RuntimeException(
+                'This lost-document report is no longer active.'
+            );
+        }
+
+        $updated = $model->markMatched($documentId);
+
+        if ($updated === null) {
+            throw new RuntimeException(
+                'Unable to mark the document as matched.'
+            );
+        }
+
+        return $model->publicData($updated);
     }
 
-    private static function model(): LostDocument
-    {
-        return new LostDocument(
-            Database::connection()
+    /**
+     * Mark a lost document as recovery pending.
+     *
+     * @return array<string, mixed>
+     */
+    public static function markRecoveryPending(
+        string $documentId
+    ): array {
+        $documentId = trim($documentId);
+
+        if ($documentId === '') {
+            throw new RuntimeException(
+                'Document ID is required.'
+            );
+        }
+
+        $database = Database::connection();
+        $model = new LostDocument($database);
+
+        $document = $model->findById($documentId);
+
+        if ($document === null) {
+            throw new RuntimeException(
+                'Lost-document report not found.'
+            );
+        }
+
+        $updated = $model->markRecoveryPending(
+            $documentId
         );
+
+        if ($updated === null) {
+            throw new RuntimeException(
+                'Unable to update the lost-document status.'
+            );
+        }
+
+        return $model->publicData($updated);
+    }
+
+    /**
+     * Mark a lost document as recovered.
+     *
+     * This should only be called after successful,
+     * verified handover.
+     *
+     * @return array<string, mixed>
+     */
+    public static function markRecovered(
+        string $documentId
+    ): array {
+        $documentId = trim($documentId);
+
+        if ($documentId === '') {
+            throw new RuntimeException(
+                'Document ID is required.'
+            );
+        }
+
+        $database = Database::connection();
+        $model = new LostDocument($database);
+
+        $document = $model->findById($documentId);
+
+        if ($document === null) {
+            throw new RuntimeException(
+                'Lost-document report not found.'
+            );
+        }
+
+        $updated = $model->markRecovered(
+            $documentId
+        );
+
+        if ($updated === null) {
+            throw new RuntimeException(
+                'Unable to mark the document as recovered.'
+            );
+        }
+
+        return $model->publicData($updated);
     }
 
     private function __construct()
