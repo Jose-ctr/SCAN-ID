@@ -6,138 +6,172 @@ namespace ScanId\Models;
 
 use PDO;
 use RuntimeException;
-use Throwable;
 
 final class PhoneVerification
 {
+    private const OTP_LENGTH = 6;
+    private const DEFAULT_TTL_SECONDS = 600;
+    private const DEFAULT_MAX_ATTEMPTS = 5;
+
     public function __construct(
         private readonly PDO $db
     ) {
     }
 
     /**
-     * Create a new OTP verification record.
+     * Create a new phone verification OTP.
      *
-     * The plaintext OTP is returned once so the SMS service can send it.
-     * Only the hash is stored in the database.
+     * The raw OTP is returned once to the caller so the SMS service
+     * can send it. Only a password hash of the OTP is stored.
+     *
+     * @return array{
+     *     id: string,
+     *     phone: string,
+     *     otp: string,
+     *     expires_at: string,
+     *     max_attempts: int
+     * }
      */
     public function create(
         string $phone,
         ?string $userId = null,
-        int $ttlSeconds = 600,
-        int $maxAttempts = 5
+        int $ttlSeconds = self::DEFAULT_TTL_SECONDS,
+        int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS
     ): array {
         $phone = $this->normalizePhone($phone);
 
-        if ($phone === '') {
-            throw new RuntimeException('A valid phone number is required.');
-        }
-
         if ($ttlSeconds < 60) {
             throw new RuntimeException(
-                'OTP expiry must be at least 60 seconds.'
+                'OTP expiration must be at least 60 seconds.'
             );
         }
 
-        if ($maxAttempts < 1) {
+        if ($maxAttempts < 1 || $maxAttempts > 10) {
             throw new RuntimeException(
-                'Maximum OTP attempts must be at least 1.'
+                'Invalid OTP attempt limit.'
             );
         }
 
-        if ($userId !== null && !$this->userExists($userId)) {
-            throw new RuntimeException('User not found.');
+        if ($userId !== null) {
+            $this->assertUserExists($userId);
         }
 
-        $otp = str_pad(
-            (string) random_int(0, 999999),
-            6,
-            '0',
-            STR_PAD_LEFT
+        $this->invalidateActiveVerifications($phone);
+
+        $otp = $this->generateOtp();
+
+        $otpHash = password_hash(
+            $otp,
+            PASSWORD_DEFAULT
         );
 
-        $otpHash = password_hash($otp, PASSWORD_DEFAULT);
-
         if ($otpHash === false) {
-            throw new RuntimeException('Unable to secure verification code.');
+            throw new RuntimeException(
+                'Failed to secure verification code.'
+            );
         }
 
-        $expiresAt = (new \DateTimeImmutable())
-            ->modify("+{$ttlSeconds} seconds")
-            ->format('Y-m-d H:i:sP');
+        $expiresAt = new \DateTimeImmutable(
+            '+' . $ttlSeconds . ' seconds'
+        );
 
-        $this->db->beginTransaction();
-
-        try {
-            // Invalidate previous unused OTPs for this phone.
-            $invalidate = $this->db->prepare(
-                'UPDATE phone_verifications
-                 SET used_at = CURRENT_TIMESTAMP
-                 WHERE phone = :phone
-                   AND used_at IS NULL
-                   AND verified_at IS NULL'
-            );
-
-            $invalidate->execute([
-                'phone' => $phone,
-            ]);
-
-            $statement = $this->db->prepare(
-                'INSERT INTO phone_verifications (
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                INSERT INTO phone_verifications (
                     user_id,
                     phone,
                     otp_hash,
                     attempts,
                     max_attempts,
                     expires_at
-                 )
-                 VALUES (
+                )
+                VALUES (
                     :user_id,
                     :phone,
                     :otp_hash,
                     0,
                     :max_attempts,
                     :expires_at
-                 )
-                 RETURNING id, phone, expires_at, created_at'
+                )
+                RETURNING
+                    id,
+                    phone,
+                    expires_at,
+                    max_attempts,
+                    created_at
+            SQL
+        );
+
+        $statement->execute([
+            'user_id' => $userId,
+            'phone' => $phone,
+            'otp_hash' => $otpHash,
+            'max_attempts' => $maxAttempts,
+            'expires_at' => $expiresAt->format(
+                'Y-m-d H:i:sP'
+            ),
+        ]);
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if ($row === false) {
+            throw new RuntimeException(
+                'Failed to create phone verification.'
             );
-
-            $statement->execute([
-                'user_id' => $userId,
-                'phone' => $phone,
-                'otp_hash' => $otpHash,
-                'max_attempts' => $maxAttempts,
-                'expires_at' => $expiresAt,
-            ]);
-
-            $verification = $statement->fetch(PDO::FETCH_ASSOC);
-
-            if ($verification === false) {
-                throw new RuntimeException(
-                    'Unable to create phone verification.'
-                );
-            }
-
-            $this->db->commit();
-
-            return [
-                'id' => (string) $verification['id'],
-                'phone' => (string) $verification['phone'],
-                'otp' => $otp,
-                'expires_at' => (string) $verification['expires_at'],
-                'created_at' => (string) $verification['created_at'],
-            ];
-        } catch (Throwable $exception) {
-            if ($this->db->inTransaction()) {
-                $this->db->rollBack();
-            }
-
-            throw $exception;
         }
+
+        return [
+            'id' => (string) $row['id'],
+            'phone' => (string) $row['phone'],
+            'otp' => $otp,
+            'expires_at' => (string) $row['expires_at'],
+            'max_attempts' => (int) $row['max_attempts'],
+        ];
     }
 
     /**
-     * Verify the latest active OTP for a phone number.
+     * Create a verification for an existing user.
+     */
+    public function createForUser(
+        string $userId,
+        int $ttlSeconds = self::DEFAULT_TTL_SECONDS,
+        int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS
+    ): array {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT phone
+                FROM users
+                WHERE id = :id
+                  AND is_active = TRUE
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $userId,
+        ]);
+
+        $phone = $statement->fetchColumn();
+
+        if ($phone === false || $phone === null) {
+            throw new RuntimeException(
+                'Active user phone number not found.'
+            );
+        }
+
+        return $this->create(
+            (string) $phone,
+            $userId,
+            $ttlSeconds,
+            $maxAttempts
+        );
+    }
+
+    /**
+     * Verify an OTP.
+     *
+     * Uses a database transaction and row locking to prevent
+     * concurrent verification attempts from bypassing limits.
      */
     public function verify(
         string $phone,
@@ -146,11 +180,10 @@ final class PhoneVerification
         $phone = $this->normalizePhone($phone);
         $otp = trim($otp);
 
-        if ($phone === '') {
-            return false;
-        }
-
-        if (!preg_match('/^\d{6}$/', $otp)) {
+        if (!preg_match(
+            '/^\d{6}$/',
+            $otp
+        )) {
             return false;
         }
 
@@ -158,31 +191,49 @@ final class PhoneVerification
 
         try {
             $statement = $this->db->prepare(
-                'SELECT
-                    id,
-                    user_id,
-                    phone,
-                    otp_hash,
-                    attempts,
-                    max_attempts,
-                    expires_at
-                 FROM phone_verifications
-                 WHERE phone = :phone
-                   AND used_at IS NULL
-                   AND verified_at IS NULL
-                 ORDER BY created_at DESC
-                 LIMIT 1
-                 FOR UPDATE'
+                <<<'SQL'
+                    SELECT
+                        id,
+                        user_id,
+                        otp_hash,
+                        attempts,
+                        max_attempts,
+                        expires_at
+                    FROM phone_verifications
+                    WHERE phone = :phone
+                      AND verified_at IS NULL
+                      AND used_at IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    FOR UPDATE
+                SQL
             );
 
             $statement->execute([
                 'phone' => $phone,
             ]);
 
-            $verification = $statement->fetch(PDO::FETCH_ASSOC);
+            $verification = $statement->fetch(
+                PDO::FETCH_ASSOC
+            );
 
             if ($verification === false) {
-                $this->db->rollBack();
+                $this->db->commit();
+
+                return false;
+            }
+
+            if (
+                strtotime(
+                    (string) $verification['expires_at']
+                ) <= time()
+            ) {
+                $this->markExpired(
+                    (string) $verification['id']
+                );
+
+                $this->db->commit();
+
                 return false;
             }
 
@@ -191,79 +242,70 @@ final class PhoneVerification
 
             if ($attempts >= $maxAttempts) {
                 $this->db->commit();
+
                 return false;
             }
 
-            $expiresAt = new \DateTimeImmutable(
-                (string) $verification['expires_at']
-            );
-
-            if ($expiresAt <= new \DateTimeImmutable()) {
-                $expire = $this->db->prepare(
-                    'UPDATE phone_verifications
-                     SET used_at = CURRENT_TIMESTAMP
-                     WHERE id = :id'
-                );
-
-                $expire->execute([
-                    'id' => $verification['id'],
-                ]);
-
-                $this->db->commit();
-                return false;
-            }
-
-            $valid = password_verify(
+            $passwordMatches = password_verify(
                 $otp,
                 (string) $verification['otp_hash']
             );
 
-            if (!$valid) {
-                $increment = $this->db->prepare(
-                    'UPDATE phone_verifications
-                     SET attempts = attempts + 1
-                     WHERE id = :id'
+            if (!$passwordMatches) {
+                $update = $this->db->prepare(
+                    <<<'SQL'
+                        UPDATE phone_verifications
+                        SET attempts = attempts + 1
+                        WHERE id = :id
+                    SQL
                 );
 
-                $increment->execute([
+                $update->execute([
                     'id' => $verification['id'],
                 ]);
 
                 $this->db->commit();
+
                 return false;
             }
 
             $update = $this->db->prepare(
-                'UPDATE phone_verifications
-                 SET verified_at = CURRENT_TIMESTAMP,
-                     used_at = CURRENT_TIMESTAMP
-                 WHERE id = :id'
+                <<<'SQL'
+                    UPDATE phone_verifications
+                    SET
+                        verified_at = NOW(),
+                        used_at = NOW()
+                    WHERE id = :id
+                SQL
             );
 
             $update->execute([
                 'id' => $verification['id'],
             ]);
 
-            if ($verification['user_id'] !== null) {
+            if (
+                $verification['user_id'] !== null
+            ) {
                 $userUpdate = $this->db->prepare(
-                    'UPDATE users
-                     SET phone_verified_at = COALESCE(
-                         phone_verified_at,
-                         CURRENT_TIMESTAMP
-                     ),
-                     updated_at = CURRENT_TIMESTAMP
-                     WHERE id = :user_id'
+                    <<<'SQL'
+                        UPDATE users
+                        SET phone_verified_at = COALESCE(
+                            phone_verified_at,
+                            NOW()
+                        )
+                        WHERE id = :id
+                    SQL
                 );
 
                 $userUpdate->execute([
-                    'user_id' => $verification['user_id'],
+                    'id' => $verification['user_id'],
                 ]);
             }
 
             $this->db->commit();
 
             return true;
-        } catch (Throwable $exception) {
+        } catch (\Throwable $exception) {
             if ($this->db->inTransaction()) {
                 $this->db->rollBack();
             }
@@ -273,113 +315,176 @@ final class PhoneVerification
     }
 
     /**
-     * Return the latest active verification for a phone.
+     * Get the latest active verification for a phone.
      *
-     * OTP hash is deliberately excluded.
+     * The OTP hash is intentionally excluded.
      */
-    public function latest(string $phone): ?array
-    {
+    public function latest(
+        string $phone
+    ): ?array {
         $phone = $this->normalizePhone($phone);
 
-        if ($phone === '') {
-            return null;
-        }
-
         $statement = $this->db->prepare(
-            'SELECT
-                id,
-                user_id,
-                phone,
-                attempts,
-                max_attempts,
-                expires_at,
-                verified_at,
-                used_at,
-                created_at
-             FROM phone_verifications
-             WHERE phone = :phone
-             ORDER BY created_at DESC
-             LIMIT 1'
+            <<<'SQL'
+                SELECT
+                    id,
+                    user_id,
+                    phone,
+                    attempts,
+                    max_attempts,
+                    expires_at,
+                    verified_at,
+                    used_at,
+                    created_at
+                FROM phone_verifications
+                WHERE phone = :phone
+                  AND verified_at IS NULL
+                  AND used_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            SQL
         );
 
         $statement->execute([
             'phone' => $phone,
         ]);
 
-        $verification = $statement->fetch(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return $verification !== false
-            ? $verification
-            : null;
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Create an OTP specifically for an existing user.
+     * Invalidate previous active OTPs for a phone.
      */
-    public function createForUser(
-        string $userId,
-        string $phone,
-        int $ttlSeconds = 600,
-        int $maxAttempts = 5
-    ): array {
-        return $this->create(
-            $phone,
-            $userId,
-            $ttlSeconds,
-            $maxAttempts
+    private function invalidateActiveVerifications(
+        string $phone
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE phone_verifications
+                SET used_at = NOW()
+                WHERE phone = :phone
+                  AND verified_at IS NULL
+                  AND used_at IS NULL
+            SQL
+        );
+
+        $statement->execute([
+            'phone' => $phone,
+        ]);
+    }
+
+    /**
+     * Mark an expired verification as used.
+     */
+    private function markExpired(
+        string $id
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE phone_verifications
+                SET used_at = COALESCE(
+                    used_at,
+                    NOW()
+                )
+                WHERE id = :id
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+    }
+
+    /**
+     * Generate a cryptographically secure six-digit OTP.
+     */
+    private function generateOtp(): string
+    {
+        $minimum = 10 ** (self::OTP_LENGTH - 1);
+        $maximum = (10 ** self::OTP_LENGTH) - 1;
+
+        return str_pad(
+            (string) random_int(
+                $minimum,
+                $maximum
+            ),
+            self::OTP_LENGTH,
+            '0',
+            STR_PAD_LEFT
         );
     }
 
     /**
-     * Normalize Kenyan phone numbers.
-     *
-     * Examples:
-     * 0712345678 -> +254712345678
-     * 712345678 -> +254712345678
-     * 254712345678 -> +254712345678
+     * Ensure the user exists and is active.
      */
-    private function normalizePhone(string $phone): string
-    {
-        $phone = trim($phone);
-
-        if ($phone === '') {
-            return '';
-        }
-
-        $phone = preg_replace('/[\s\-\(\)]/', '', $phone) ?? '';
-
-        if (str_starts_with($phone, '00')) {
-            $phone = '+' . substr($phone, 2);
-        }
-
-        if (str_starts_with($phone, '0')) {
-            $phone = '+254' . substr($phone, 1);
-        } elseif (str_starts_with($phone, '254')) {
-            $phone = '+' . $phone;
-        }
-
-        if (!preg_match('/^\+2547\d{8}$/', $phone)) {
-            throw new RuntimeException(
-                'Invalid Kenyan phone number.'
-            );
-        }
-
-        return $phone;
-    }
-
-    private function userExists(string $userId): bool
-    {
+    private function assertUserExists(
+        string $userId
+    ): void {
         $statement = $this->db->prepare(
-            'SELECT 1
-             FROM users
-             WHERE id = :id
-             LIMIT 1'
+            <<<'SQL'
+                SELECT 1
+                FROM users
+                WHERE id = :id
+                  AND is_active = TRUE
+                LIMIT 1
+            SQL
         );
 
         $statement->execute([
             'id' => $userId,
         ]);
 
-        return $statement->fetchColumn() !== false;
+        if ($statement->fetchColumn() === false) {
+            throw new RuntimeException(
+                'User not found or inactive.'
+            );
+        }
+    }
+
+    /**
+     * Normalize Kenyan phone numbers.
+     */
+    private function normalizePhone(
+        string $phone
+    ): string {
+        $phone = preg_replace(
+            '/[\s().-]+/',
+            '',
+            trim($phone)
+        );
+
+        if ($phone === null || $phone === '') {
+            throw new RuntimeException(
+                'Phone number is required.'
+            );
+        }
+
+        if (str_starts_with($phone, '+254')) {
+            $normalized = $phone;
+        } elseif (str_starts_with($phone, '254')) {
+            $normalized = '+' . $phone;
+        } elseif (
+            str_starts_with($phone, '07') ||
+            str_starts_with($phone, '01')
+        ) {
+            $normalized = '+254' . substr($phone, 1);
+        } else {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        if (!preg_match(
+            '/^\+254(?:7|1)\d{8}$/',
+            $normalized
+        )) {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        return $normalized;
     }
 }
