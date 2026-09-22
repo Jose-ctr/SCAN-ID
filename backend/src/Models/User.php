@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace ScanId\Models;
 
 use PDO;
-use PDOException;
 use RuntimeException;
 
 final class User
@@ -16,114 +15,133 @@ final class User
     }
 
     /**
-     * Find a user by UUID.
+     * Find a user by ID.
      *
-     * Password hash is intentionally excluded.
+     * Password hashes are intentionally excluded.
      */
     public function findById(string $id): ?array
     {
-        $stmt = $this->db->prepare(
-            'SELECT
-                id,
-                full_name,
-                phone,
-                email,
-                role,
-                phone_verified_at,
-                is_active,
-                created_at,
-                updated_at
-             FROM users
-             WHERE id = :id
-             LIMIT 1'
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    full_name,
+                    phone,
+                    email,
+                    role,
+                    phone_verified_at,
+                    is_active,
+                    created_at,
+                    updated_at
+                FROM users
+                WHERE id = :id
+                LIMIT 1
+            SQL
         );
 
-        $stmt->execute([
+        $statement->execute([
             'id' => $id,
         ]);
 
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        $user = $statement->fetch(PDO::FETCH_ASSOC);
 
         return $user !== false ? $user : null;
     }
 
     /**
-     * Find a user by phone number.
+     * Find a user by phone for authentication.
      *
-     * Includes password hash for authentication.
+     * The password hash is included because AuthService
+     * needs it to verify the supplied password.
      */
-    public function findByPhone(string $phone): ?array
-    {
-        $stmt = $this->db->prepare(
-            'SELECT
-                id,
-                full_name,
-                phone,
-                email,
-                password_hash,
-                role,
-                phone_verified_at,
-                is_active,
-                created_at,
-                updated_at
-             FROM users
-             WHERE phone = :phone
-             LIMIT 1'
+    public function findByPhone(
+        string $phone
+    ): ?array {
+        $phone = $this->normalizePhone($phone);
+
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    full_name,
+                    phone,
+                    email,
+                    password_hash,
+                    role,
+                    phone_verified_at,
+                    is_active,
+                    created_at,
+                    updated_at
+                FROM users
+                WHERE phone = :phone
+                LIMIT 1
+            SQL
         );
 
-        $stmt->execute([
-            'phone' => trim($phone),
+        $statement->execute([
+            'phone' => $phone,
         ]);
 
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        $user = $statement->fetch(PDO::FETCH_ASSOC);
 
         return $user !== false ? $user : null;
     }
 
     /**
-     * Find a user by email address.
+     * Find a user by email.
      *
-     * Password hash is intentionally excluded.
+     * Password hashes are intentionally excluded.
      */
-    public function findByEmail(string $email): ?array
-    {
-        $stmt = $this->db->prepare(
-            'SELECT
-                id,
-                full_name,
-                phone,
-                email,
-                role,
-                phone_verified_at,
-                is_active,
-                created_at,
-                updated_at
-             FROM users
-             WHERE LOWER(email) = LOWER(:email)
-             LIMIT 1'
+    public function findByEmail(
+        string $email
+    ): ?array {
+        $email = strtolower(trim($email));
+
+        if (
+            $email === '' ||
+            !filter_var($email, FILTER_VALIDATE_EMAIL)
+        ) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    full_name,
+                    phone,
+                    email,
+                    role,
+                    phone_verified_at,
+                    is_active,
+                    created_at,
+                    updated_at
+                FROM users
+                WHERE LOWER(email) = :email
+                LIMIT 1
+            SQL
         );
 
-        $stmt->execute([
-            'email' => strtolower(trim($email)),
+        $statement->execute([
+            'email' => $email,
         ]);
 
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        $user = $statement->fetch(PDO::FETCH_ASSOC);
 
         return $user !== false ? $user : null;
     }
 
     /**
-     * Create a new SCAN-ID user.
+     * Create a new user.
      */
     public function create(
         string $fullName,
         string $phone,
-        string $password,
-        ?string $email = null
+        ?string $email,
+        string $password
     ): array {
         $fullName = trim($fullName);
-        $phone = trim($phone);
-        $password = trim($password);
+        $phone = $this->normalizePhone($phone);
 
         if ($fullName === '') {
             throw new RuntimeException(
@@ -131,30 +149,34 @@ final class User
             );
         }
 
-        if ($phone === '') {
+        if (mb_strlen($fullName) > 150) {
             throw new RuntimeException(
-                'Phone number is required.'
+                'Full name is too long.'
             );
         }
 
-        if ($password === '') {
-            throw new RuntimeException(
-                'Password is required.'
-            );
+        if (
+            $email !== null &&
+            trim($email) !== ''
+        ) {
+            $email = strtolower(trim($email));
+
+            if (!filter_var(
+                $email,
+                FILTER_VALIDATE_EMAIL
+            )) {
+                throw new RuntimeException(
+                    'Invalid email address.'
+                );
+            }
+        } else {
+            $email = null;
         }
 
-        if (strlen($password) < 8) {
+        if (mb_strlen($password) < 8) {
             throw new RuntimeException(
                 'Password must be at least 8 characters.'
             );
-        }
-
-        $email = $email !== null
-            ? strtolower(trim($email))
-            : null;
-
-        if ($email === '') {
-            $email = null;
         }
 
         $passwordHash = password_hash(
@@ -164,13 +186,13 @@ final class User
 
         if ($passwordHash === false) {
             throw new RuntimeException(
-                'Unable to securely create password hash.'
+                'Failed to secure password.'
             );
         }
 
-        try {
-            $stmt = $this->db->prepare(
-                'INSERT INTO users (
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                INSERT INTO users (
                     full_name,
                     phone,
                     email,
@@ -183,8 +205,8 @@ final class User
                     :phone,
                     :email,
                     :password_hash,
-                    :role,
-                    :is_active
+                    'user',
+                    TRUE
                 )
                 RETURNING
                     id,
@@ -195,164 +217,204 @@ final class User
                     phone_verified_at,
                     is_active,
                     created_at,
-                    updated_at'
-            );
+                    updated_at
+            SQL
+        );
 
-            $stmt->execute([
+        try {
+            $statement->execute([
                 'full_name' => $fullName,
                 'phone' => $phone,
                 'email' => $email,
                 'password_hash' => $passwordHash,
-                'role' => 'user',
-                'is_active' => true,
             ]);
-
-            $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-            if ($user === false) {
-                throw new RuntimeException(
-                    'User was created but could not be returned.'
-                );
-            }
-
-            return $user;
-        } catch (PDOException $exception) {
+        } catch (\PDOException $exception) {
             if ($exception->getCode() === '23505') {
                 throw new RuntimeException(
-                    'A user with this phone number or email already exists.'
+                    'A user with this phone or email already exists.',
+                    0,
+                    $exception
                 );
             }
 
             throw $exception;
         }
+
+        $user = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if ($user === false) {
+            throw new RuntimeException(
+                'Failed to create user.'
+            );
+        }
+
+        return $user;
     }
 
     /**
-     * Find a user specifically for authentication.
-     *
-     * This is the only normal lookup that returns
-     * the password hash.
-     */
-    public function findForAuthentication(
-        string $phone
-    ): ?array {
-        return $this->findByPhone($phone);
-    }
-
-    /**
-     * Verify a user's password.
+     * Verify a supplied password against a stored hash.
      */
     public function verifyPassword(
-        array $user,
-        string $password
+        string $password,
+        string $passwordHash
     ): bool {
-        if (
-            !isset($user['password_hash']) ||
-            $user['password_hash'] === '' ||
-            $password === ''
-        ) {
+        if ($password === '' || $passwordHash === '') {
             return false;
         }
 
         return password_verify(
             $password,
-            $user['password_hash']
+            $passwordHash
         );
     }
 
     /**
-     * Mark a user's phone number as verified.
+     * Mark the user's phone as verified.
      */
     public function markPhoneVerified(
-        string $userId
+        string $id
     ): bool {
-        $stmt = $this->db->prepare(
-            'UPDATE users
-             SET phone_verified_at = NOW()
-             WHERE id = :id
-             RETURNING id'
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE users
+                SET phone_verified_at = COALESCE(
+                    phone_verified_at,
+                    NOW()
+                )
+                WHERE id = :id
+                RETURNING id
+            SQL
         );
 
-        $stmt->execute([
-            'id' => $userId,
+        $statement->execute([
+            'id' => $id,
         ]);
 
-        return $stmt->fetchColumn() !== false;
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Check whether a user's phone number is verified.
+     * Check whether a user's phone is verified.
      */
     public function isPhoneVerified(
-        string $userId
+        string $id
     ): bool {
-        $stmt = $this->db->prepare(
-            'SELECT phone_verified_at
-             FROM users
-             WHERE id = :id
-             LIMIT 1'
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT phone_verified_at
+                FROM users
+                WHERE id = :id
+                LIMIT 1
+            SQL
         );
 
-        $stmt->execute([
-            'id' => $userId,
+        $statement->execute([
+            'id' => $id,
         ]);
 
-        $verifiedAt = $stmt->fetchColumn();
+        $value = $statement->fetchColumn();
 
-        return $verifiedAt !== false
-            && $verifiedAt !== null;
+        return $value !== false && $value !== null;
+    }
+
+    /**
+     * Activate a user account.
+     */
+    public function activate(
+        string $id
+    ): bool {
+        return $this->setActive($id, true);
     }
 
     /**
      * Deactivate a user account.
      */
     public function deactivate(
-        string $userId
+        string $id
     ): bool {
-        $stmt = $this->db->prepare(
-            'UPDATE users
-             SET is_active = FALSE
-             WHERE id = :id
-             RETURNING id'
-        );
-
-        $stmt->execute([
-            'id' => $userId,
-        ]);
-
-        return $stmt->fetchColumn() !== false;
+        return $this->setActive($id, false);
     }
 
     /**
-     * Reactivate a user account.
-     */
-    public function activate(
-        string $userId
-    ): bool {
-        $stmt = $this->db->prepare(
-            'UPDATE users
-             SET is_active = TRUE
-             WHERE id = :id
-             RETURNING id'
-        );
-
-        $stmt->execute([
-            'id' => $userId,
-        ]);
-
-        return $stmt->fetchColumn() !== false;
-    }
-
-    /**
-     * Remove sensitive authentication data.
+     * Return only safe public/authenticated user data.
      */
     public function publicData(
         array $user
     ): array {
         unset(
-            $user['password_hash']
+            $user['password_hash'],
+            $user['password']
         );
 
         return $user;
+    }
+
+    /**
+     * Set account active state.
+     */
+    private function setActive(
+        string $id,
+        bool $active
+    ): bool {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE users
+                SET is_active = :is_active
+                WHERE id = :id
+                RETURNING id
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+            'is_active' => $active,
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Normalize Kenyan phone numbers to +254 format.
+     */
+    private function normalizePhone(
+        string $phone
+    ): string {
+        $phone = preg_replace(
+            '/[\s().-]+/',
+            '',
+            trim($phone)
+        );
+
+        if ($phone === null || $phone === '') {
+            throw new RuntimeException(
+                'Phone number is required.'
+            );
+        }
+
+        if (str_starts_with($phone, '+254')) {
+            $normalized = $phone;
+        } elseif (str_starts_with($phone, '254')) {
+            $normalized = '+' . $phone;
+        } elseif (
+            str_starts_with($phone, '07') ||
+            str_starts_with($phone, '01')
+        ) {
+            $normalized = '+254' . substr($phone, 1);
+        } else {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        if (!preg_match(
+            '/^\+254(?:7|1)\d{8}$/',
+            $normalized
+        )) {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        return $normalized;
     }
 }
