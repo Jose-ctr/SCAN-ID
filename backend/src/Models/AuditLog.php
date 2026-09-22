@@ -10,16 +10,18 @@ use RuntimeException;
 final class AuditLog
 {
     public function __construct(
-        private readonly PDO $database
+        private readonly PDO $db
     ) {
     }
 
     /**
-     * Record an auditable system action.
+     * Create an audit log entry.
      *
-     * IMPORTANT:
-     * Never pass passwords, OTPs, raw document numbers,
-     * recovery tokens, API keys, or M-Pesa secrets in metadata.
+     * Sensitive values such as passwords, OTPs, raw document numbers,
+     * authentication tokens and M-Pesa secrets must never be placed
+     * in metadata.
+     *
+     * @param array<string, mixed>|null $metadata
      */
     public function create(
         ?string $userId,
@@ -27,8 +29,7 @@ final class AuditLog
         string $entityType,
         ?string $entityId = null,
         ?string $ipAddress = null,
-        ?string $userAgent = null,
-        array $metadata = []
+        ?array $metadata = null
     ): array {
         $action = trim($action);
         $entityType = trim($entityType);
@@ -39,298 +40,273 @@ final class AuditLog
             );
         }
 
-        if (strlen($action) > 100) {
-            throw new RuntimeException(
-                'Audit action is too long.'
-            );
-        }
-
         if ($entityType === '') {
             throw new RuntimeException(
                 'Audit entity type is required.'
             );
         }
 
-        if (strlen($entityType) > 100) {
-            throw new RuntimeException(
-                'Audit entity type is too long.'
-            );
-        }
+        $metadataJson = null;
 
-        if ($userId !== null) {
-            $userId = trim($userId);
-
-            if ($userId === '') {
-                $userId = null;
-            }
-        }
-
-        if ($entityId !== null) {
-            $entityId = trim($entityId);
-
-            if ($entityId === '') {
-                $entityId = null;
-            }
-        }
-
-        if ($ipAddress !== null) {
-            $ipAddress = trim($ipAddress);
-
-            if ($ipAddress === '') {
-                $ipAddress = null;
-            }
-
-            if (
-                $ipAddress !== null &&
-                filter_var(
-                    $ipAddress,
-                    FILTER_VALIDATE_IP
-                ) === false
-            ) {
+        if ($metadata !== null) {
+            try {
+                $metadataJson = json_encode(
+                    $metadata,
+                    JSON_THROW_ON_ERROR |
+                    JSON_UNESCAPED_SLASHES |
+                    JSON_UNESCAPED_UNICODE
+                );
+            } catch (\JsonException $exception) {
                 throw new RuntimeException(
-                    'Invalid audit IP address.'
+                    'Audit metadata could not be encoded.',
+                    0,
+                    $exception
                 );
             }
         }
 
-        if ($userAgent !== null) {
-            $userAgent = trim($userAgent);
-
-            if ($userAgent === '') {
-                $userAgent = null;
-            }
-
-            if (
-                $userAgent !== null &&
-                strlen($userAgent) > 1000
-            ) {
-                $userAgent = substr($userAgent, 0, 1000);
-            }
-        }
-
-        $encodedMetadata = json_encode(
-            $metadata,
-            JSON_THROW_ON_ERROR
-        );
-
-        $statement = $this->database->prepare(
-            '
-            INSERT INTO audit_logs (
-                user_id,
-                action,
-                entity_type,
-                entity_id,
-                ip_address,
-                user_agent,
-                metadata
-            )
-            VALUES (
-                CAST(:user_id AS UUID),
-                :action,
-                :entity_type,
-                CAST(:entity_id AS UUID),
-                CAST(:ip_address AS INET),
-                :user_agent,
-                CAST(:metadata AS JSONB)
-            )
-            RETURNING
-                id,
-                user_id,
-                action,
-                entity_type,
-                entity_id,
-                ip_address,
-                user_agent,
-                metadata,
-                created_at
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                INSERT INTO audit_logs (
+                    user_id,
+                    action,
+                    entity_type,
+                    entity_id,
+                    ip_address,
+                    metadata
+                )
+                VALUES (
+                    :user_id,
+                    :action,
+                    :entity_type,
+                    :entity_id,
+                    :ip_address,
+                    CAST(:metadata AS JSONB)
+                )
+                RETURNING
+                    id,
+                    user_id,
+                    action,
+                    entity_type,
+                    entity_id,
+                    ip_address,
+                    metadata,
+                    created_at
+            SQL
         );
 
         $statement->execute([
-            'user_id' => $userId,
+            'user_id' => $this->nullableString($userId),
             'action' => $action,
             'entity_type' => $entityType,
-            'entity_id' => $entityId,
-            'ip_address' => $ipAddress,
-            'user_agent' => $userAgent,
-            'metadata' => $encodedMetadata,
+            'entity_id' => $this->nullableString($entityId),
+            'ip_address' => $this->nullableString($ipAddress),
+            'metadata' => $metadataJson,
         ]);
 
-        $log = $statement->fetch();
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        if (!is_array($log)) {
+        if ($row === false) {
             throw new RuntimeException(
-                'Unable to create audit log.'
+                'Failed to create audit log.'
             );
         }
 
-        return $log;
+        return $row;
     }
 
     /**
-     * Find one audit log entry.
+     * Find an audit log by ID.
      */
     public function findById(
         string $id
     ): ?array {
-        $id = trim($id);
-
-        if ($id === '') {
-            return null;
-        }
-
-        $statement = $this->database->prepare(
-            '
-            SELECT
-                id,
-                user_id,
-                action,
-                entity_type,
-                entity_id,
-                ip_address,
-                user_agent,
-                metadata,
-                created_at
-            FROM audit_logs
-            WHERE id = CAST(:id AS UUID)
-            LIMIT 1
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT
+                    id,
+                    user_id,
+                    action,
+                    entity_type,
+                    entity_id,
+                    ip_address,
+                    metadata,
+                    created_at
+                FROM audit_logs
+                WHERE id = :id
+                LIMIT 1
+            SQL
         );
 
         $statement->execute([
             'id' => $id,
         ]);
 
-        $log = $statement->fetch();
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($log)
-            ? $log
-            : null;
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Get audit history for an entity.
+     * Get audit logs for a user.
      */
-    public function forEntity(
+    public function findByUser(
+        string $userId,
+        int $limit = 100
+    ): array {
+        $limit = $this->normalizeLimit($limit);
+
+        $statement = $this->db->prepare(
+            <<<SQL
+                SELECT
+                    id,
+                    user_id,
+                    action,
+                    entity_type,
+                    entity_id,
+                    ip_address,
+                    metadata,
+                    created_at
+                FROM audit_logs
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+                LIMIT {$limit}
+            SQL
+        );
+
+        $statement->execute([
+            'user_id' => $userId,
+        ]);
+
+        return $statement->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Get audit logs for an entity.
+     */
+    public function findByEntity(
         string $entityType,
         string $entityId,
-        int $limit = 50
+        int $limit = 100
     ): array {
         $entityType = trim($entityType);
         $entityId = trim($entityId);
+        $limit = $this->normalizeLimit($limit);
 
-        if (
-            $entityType === '' ||
-            $entityId === ''
-        ) {
-            throw new RuntimeException(
-                'Entity type and entity ID are required.'
-            );
+        if ($entityType === '' || $entityId === '') {
+            return [];
         }
 
-        $limit = max(1, min($limit, 200));
-
-        $statement = $this->database->prepare(
-            '
-            SELECT
-                id,
-                user_id,
-                action,
-                entity_type,
-                entity_id,
-                ip_address,
-                user_agent,
-                metadata,
-                created_at
-            FROM audit_logs
-            WHERE entity_type = :entity_type
-              AND entity_id = CAST(:entity_id AS UUID)
-            ORDER BY created_at DESC
-            LIMIT :limit
-            '
+        $statement = $this->db->prepare(
+            <<<SQL
+                SELECT
+                    id,
+                    user_id,
+                    action,
+                    entity_type,
+                    entity_id,
+                    ip_address,
+                    metadata,
+                    created_at
+                FROM audit_logs
+                WHERE entity_type = :entity_type
+                  AND entity_id = :entity_id
+                ORDER BY created_at DESC
+                LIMIT {$limit}
+            SQL
         );
 
-        $statement->bindValue(
-            ':entity_type',
-            $entityType,
-            PDO::PARAM_STR
-        );
+        $statement->execute([
+            'entity_type' => $entityType,
+            'entity_id' => $entityId,
+        ]);
 
-        $statement->bindValue(
-            ':entity_id',
-            $entityId,
-            PDO::PARAM_STR
-        );
-
-        $statement->bindValue(
-            ':limit',
-            $limit,
-            PDO::PARAM_INT
-        );
-
-        $statement->execute();
-
-        return $statement->fetchAll();
+        return $statement->fetchAll(PDO::FETCH_ASSOC);
     }
 
     /**
-     * Get recent audit history for a user.
+     * Get recent audit activity.
      */
-    public function forUser(
-        string $userId,
-        int $limit = 50
+    public function recent(
+        int $limit = 100
     ): array {
-        $userId = trim($userId);
+        $limit = $this->normalizeLimit($limit);
 
-        if ($userId === '') {
+        $statement = $this->db->query(
+            <<<SQL
+                SELECT
+                    id,
+                    user_id,
+                    action,
+                    entity_type,
+                    entity_id,
+                    ip_address,
+                    metadata,
+                    created_at
+                FROM audit_logs
+                ORDER BY created_at DESC
+                LIMIT {$limit}
+            SQL
+        );
+
+        return $statement->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Delete audit records older than the supplied number of days.
+     *
+     * This should only be used if the application's retention policy
+     * permits deletion.
+     */
+    public function deleteOlderThan(
+        int $days
+    ): int {
+        if ($days < 1) {
             throw new RuntimeException(
-                'User ID is required.'
+                'Audit retention must be at least 1 day.'
             );
         }
 
-        $limit = max(1, min($limit, 200));
-
-        $statement = $this->database->prepare(
-            '
-            SELECT
-                id,
-                user_id,
-                action,
-                entity_type,
-                entity_id,
-                ip_address,
-                user_agent,
-                metadata,
-                created_at
-            FROM audit_logs
-            WHERE user_id = CAST(:user_id AS UUID)
-            ORDER BY created_at DESC
-            LIMIT :limit
-            '
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                DELETE FROM audit_logs
+                WHERE created_at < NOW() - (
+                    :days * INTERVAL '1 day'
+                )
+                RETURNING id
+            SQL
         );
 
-        $statement->bindValue(
-            ':user_id',
-            $userId,
-            PDO::PARAM_STR
+        $statement->execute([
+            'days' => $days,
+        ]);
+
+        return count(
+            $statement->fetchAll(PDO::FETCH_COLUMN)
         );
-
-        $statement->bindValue(
-            ':limit',
-            $limit,
-            PDO::PARAM_INT
-        );
-
-        $statement->execute();
-
-        return $statement->fetchAll();
     }
 
-    private function __clone()
-    {
+    /**
+     * Convert empty strings to NULL.
+     */
+    private function nullableString(
+        ?string $value
+    ): ?string {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
     }
 
-    private function __wakeup()
-    {
+    /**
+     * Keep query limits within a safe range.
+     */
+    private function normalizeLimit(
+        int $limit
+    ): int {
+        return max(1, min($limit, 500));
     }
 }
