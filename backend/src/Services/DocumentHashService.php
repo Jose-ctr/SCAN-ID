@@ -9,37 +9,31 @@ use RuntimeException;
 final class DocumentHashService
 {
     /**
-     * Create a protected lookup hash for a document number.
+     * Supported SCAN-ID document types.
      *
-     * The raw document number is never stored.
-     * HMAC-SHA256 is used instead of plain SHA-256 so that
-     * predictable document numbers cannot be easily brute-forced.
+     * @return array<int, string>
      */
-    public static function hash(
-        string $documentNumber
-    ): string {
-        $normalized = self::normalize($documentNumber);
-        $secret = self::secret();
-
-        return hash_hmac(
-            'sha256',
-            $normalized,
-            $secret
-        );
+    public static function supportedDocumentTypes(): array
+    {
+        return [
+            'national_id',
+            'passport',
+            'driving_licence',
+            'student_id',
+            'staff_id',
+            'bank_card',
+            'insurance_card',
+            'other',
+        ];
     }
 
     /**
      * Normalize a document number before hashing.
      *
-     * Spaces, dashes and letter case differences are ignored.
-     * Example:
-     *
-     *     "A-123 456"
-     *     "a123456"
-     *
-     * produce the same lookup value.
+     * Spaces, hyphens and other formatting differences are removed.
+     * Letters are converted to uppercase.
      */
-    public static function normalize(
+    public static function normalizeDocumentNumber(
         string $documentNumber
     ): string {
         $documentNumber = trim($documentNumber);
@@ -50,106 +44,119 @@ final class DocumentHashService
             );
         }
 
-        $documentNumber = strtoupper($documentNumber);
-
-        $documentNumber = preg_replace(
-            '/[\s\-]+/',
+        /*
+         * Keep only letters and numbers.
+         *
+         * This means values such as:
+         * AB 123-456
+         * AB-123456
+         * ab123456
+         *
+         * resolve to the same protected identifier.
+         */
+        $normalized = preg_replace(
+            '/[^A-Za-z0-9]/',
             '',
             $documentNumber
         );
 
-        if ($documentNumber === null) {
+        if (
+            $normalized === null ||
+            $normalized === ''
+        ) {
             throw new RuntimeException(
-                'Unable to normalize document number.'
+                'Invalid document number.'
             );
         }
 
-        if ($documentNumber === '') {
-            throw new RuntimeException(
-                'Document number is invalid.'
-            );
-        }
+        $normalized = strtoupper($normalized);
 
-        if (strlen($documentNumber) > 100) {
+        if (strlen($normalized) > 100) {
             throw new RuntimeException(
                 'Document number is too long.'
             );
         }
 
-        return $documentNumber;
+        return $normalized;
     }
 
     /**
-     * Return the last four characters of the normalized
-     * document number for controlled display.
+     * Create a protected SHA-256 document identifier.
+     *
+     * The raw document number must never be stored in the database.
+     */
+    public static function hashDocumentNumber(
+        string $documentNumber
+    ): string {
+        $normalized = self::normalizeDocumentNumber(
+            $documentNumber
+        );
+
+        return hash(
+            'sha256',
+            $normalized
+        );
+    }
+
+    /**
+     * Return only the final four characters for safe display.
      */
     public static function lastFour(
         string $documentNumber
     ): string {
-        $normalized = self::normalize($documentNumber);
-
-        if (strlen($normalized) < 4) {
-            throw new RuntimeException(
-                'Document number must contain at least 4 characters.'
-            );
-        }
-
-        return substr($normalized, -4);
-    }
-
-    /**
-     * Compare a supplied document number with a stored hash.
-     *
-     * The comparison uses the same server-side secret.
-     */
-    public static function matches(
-        string $documentNumber,
-        string $storedHash
-    ): bool {
-        $storedHash = strtolower(trim($storedHash));
-
-        if (
-            $storedHash === '' ||
-            !preg_match('/^[a-f0-9]{64}$/', $storedHash)
-        ) {
-            return false;
-        }
-
-        $calculatedHash = self::hash(
+        $normalized = self::normalizeDocumentNumber(
             $documentNumber
         );
 
-        return hash_equals(
-            $storedHash,
-            $calculatedHash
+        return substr(
+            $normalized,
+            -4
         );
     }
 
     /**
-     * Get the server-side document hashing secret.
+     * Validate a document type.
      */
-    private static function secret(): string
-    {
-        $secret = trim(
-            (string) (
-                $_ENV['DOCUMENT_HASH_SECRET']
-                ?? ''
-            )
+    public static function validateDocumentType(
+        string $documentType
+    ): string {
+        $documentType = strtolower(
+            trim($documentType)
         );
 
-        if ($secret === '') {
+        if (
+            !in_array(
+                $documentType,
+                self::supportedDocumentTypes(),
+                true
+            )
+        ) {
             throw new RuntimeException(
-                'DOCUMENT_HASH_SECRET is not configured.'
+                'Unsupported document type.'
             );
         }
 
-        if (strlen($secret) < 32) {
-            throw new RuntimeException(
-                'DOCUMENT_HASH_SECRET must contain at least 32 characters.'
-            );
-        }
+        return $documentType;
+    }
 
-        return $secret;
+    /**
+     * Build the protected document data used by models.
+     *
+     * @return array{
+     *     document_number_hash: string,
+     *     document_number_last4: string
+     * }
+     */
+    public static function prepare(
+        string $documentNumber
+    ): array {
+        return [
+            'document_number_hash' =>
+                self::hashDocumentNumber($documentNumber),
+
+            'document_number_last4' =>
+                self::lastFour($documentNumber),
+        ];
     }
 
     private function __construct()
