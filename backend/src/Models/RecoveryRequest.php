@@ -9,146 +9,121 @@ use RuntimeException;
 
 final class RecoveryRequest
 {
-    private const DEFAULT_EXPIRY_SECONDS = 86400;
-
-    private const STATUSES = [
+    private const ACTIVE_STATUSES = [
         'pending',
         'notified',
         'payment_pending',
         'paid',
         'contact_released',
-        'completed',
-        'cancelled',
-        'expired',
     ];
 
     public function __construct(
-        private readonly PDO $database
+        private readonly PDO $db
     ) {
     }
 
     /**
-     * Create a recovery request linking a lost document
-     * to a found document.
+     * Create a recovery request.
      *
-     * Payment amounts are deliberately NOT stored here.
-     * RecoveryPayment owns payment information.
+     * One recovery request connects one lost document
+     * to one found document.
      */
     public function create(
+        string $lostDocumentId,
         string $foundDocumentId,
-        ?string $lostDocumentId,
         ?string $ownerUserId,
         string $ownerPhone,
-        int $expiresInSeconds = self::DEFAULT_EXPIRY_SECONDS
+        int $expiresInSeconds = 86400
     ): array {
-        $foundDocumentId = trim($foundDocumentId);
-
-        $lostDocumentId = $lostDocumentId !== null
-            ? trim($lostDocumentId)
-            : null;
-
-        $ownerUserId = $ownerUserId !== null
-            ? trim($ownerUserId)
-            : null;
-
         $ownerPhone = $this->normalizePhone($ownerPhone);
-
-        if ($foundDocumentId === '') {
-            throw new RuntimeException(
-                'Found document ID is required.'
-            );
-        }
-
-        if ($lostDocumentId === '') {
-            $lostDocumentId = null;
-        }
-
-        if ($ownerUserId === '') {
-            $ownerUserId = null;
-        }
-
-        if ($ownerPhone === '') {
-            throw new RuntimeException(
-                'Owner phone number is required.'
-            );
-        }
 
         if ($expiresInSeconds < 300) {
             throw new RuntimeException(
-                'Recovery request expiry must be at least 5 minutes.'
+                'Recovery request expiration must be at least 5 minutes.'
             );
         }
 
-        $this->assertFoundDocumentExists(
+        $this->assertLostDocumentExists($lostDocumentId);
+        $this->assertFoundDocumentExists($foundDocumentId);
+
+        $existing = $this->findActiveByFoundDocument(
             $foundDocumentId
         );
 
-        if ($lostDocumentId !== null) {
-            $this->assertLostDocumentExists(
-                $lostDocumentId
-            );
+        if ($existing !== null) {
+            return $existing;
         }
 
-        if ($ownerUserId !== null) {
-            $this->assertUserExists(
-                $ownerUserId
-            );
-        }
+        $expiresAt = new \DateTimeImmutable(
+            '+' . $expiresInSeconds . ' seconds'
+        );
 
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            INSERT INTO recovery_requests (
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                expires_at
-            )
-            VALUES (
-                :lost_id_id,
-                :found_id_id,
-                :owner_user_id,
-                :owner_phone,
-                'pending',
-                NOW() + (
-                    :expires_in_seconds * INTERVAL '1 second'
+                INSERT INTO recovery_requests (
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    expires_at
                 )
-            )
-            RETURNING
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
+                VALUES (
+                    :lost_document_id,
+                    :found_document_id,
+                    :owner_user_id,
+                    :owner_phone,
+                    'pending',
+                    :expires_at
+                )
+                RETURNING
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
             SQL
         );
 
-        $statement->execute([
-            'lost_id_id' => $lostDocumentId,
-            'found_id_id' => $foundDocumentId,
-            'owner_user_id' => $ownerUserId,
-            'owner_phone' => $ownerPhone,
-            'expires_in_seconds' => $expiresInSeconds,
-        ]);
+        try {
+            $statement->execute([
+                'lost_document_id' => $lostDocumentId,
+                'found_document_id' => $foundDocumentId,
+                'owner_user_id' => $ownerUserId,
+                'owner_phone' => $ownerPhone,
+                'expires_at' => $expiresAt->format('Y-m-d H:i:sP'),
+            ]);
+        } catch (\PDOException $exception) {
+            if ($this->isDuplicateActiveRequestError($exception)) {
+                $existing = $this->findActiveByFoundDocument(
+                    $foundDocumentId
+                );
 
-        $request = $statement->fetch(PDO::FETCH_ASSOC);
+                if ($existing !== null) {
+                    return $existing;
+                }
+            }
 
-        if (!is_array($request)) {
+            throw $exception;
+        }
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if ($row === false) {
             throw new RuntimeException(
-                'Unable to create recovery request.'
+                'Failed to create recovery request.'
             );
         }
 
-        return $request;
+        return $row;
     }
 
     /**
@@ -157,31 +132,25 @@ final class RecoveryRequest
     public function findById(
         string $id
     ): ?array {
-        $id = trim($id);
-
-        if ($id === '') {
-            return null;
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            SELECT
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
-            FROM recovery_requests
-            WHERE id = :id
-            LIMIT 1
+                SELECT
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM recovery_requests
+                WHERE id = :id
+                LIMIT 1
             SQL
         );
 
@@ -189,182 +158,166 @@ final class RecoveryRequest
             'id' => $id,
         ]);
 
-        $request = $statement->fetch(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($request)
-            ? $request
-            : null;
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Find all recovery requests for a found document.
+     * Find a request by found document.
      */
     public function findByFoundDocument(
         string $foundDocumentId
-    ): array {
-        $foundDocumentId = trim($foundDocumentId);
-
-        if ($foundDocumentId === '') {
-            return [];
-        }
-
-        $statement = $this->database->prepare(
+    ): ?array {
+        $statement = $this->db->prepare(
             <<<'SQL'
-            SELECT
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
-            FROM recovery_requests
-            WHERE found_id_id = :found_id_id
-            ORDER BY requested_at DESC
+                SELECT
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM recovery_requests
+                WHERE found_document_id = :found_document_id
+                ORDER BY requested_at DESC
+                LIMIT 1
             SQL
         );
 
         $statement->execute([
-            'found_id_id' => $foundDocumentId,
+            'found_document_id' => $foundDocumentId,
         ]);
 
-        return $statement->fetchAll(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Find the current active recovery request
-     * for a found document.
+     * Find an active request by found document.
      */
     public function findActiveByFoundDocument(
         string $foundDocumentId
     ): ?array {
-        $foundDocumentId = trim($foundDocumentId);
+        $placeholders = $this->statusPlaceholders(
+            self::ACTIVE_STATUSES
+        );
 
-        if ($foundDocumentId === '') {
-            return null;
+        $parameters = [
+            'found_document_id' => $foundDocumentId,
+        ];
+
+        foreach (self::ACTIVE_STATUSES as $index => $status) {
+            $parameters['status_' . $index] = $status;
         }
 
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
-            FROM recovery_requests
-            WHERE found_id_id = :found_id_id
-              AND status NOT IN (
-                  'completed',
-                  'cancelled',
-                  'expired'
-              )
-              AND (
-                  expires_at IS NULL
-                  OR expires_at > CURRENT_TIMESTAMP
-              )
-            ORDER BY requested_at DESC
-            LIMIT 1
+        $statement = $this->db->prepare(
+            <<<SQL
+                SELECT
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM recovery_requests
+                WHERE found_document_id = :found_document_id
+                  AND status IN ({$placeholders})
+                  AND expires_at > NOW()
+                ORDER BY requested_at DESC
+                LIMIT 1
             SQL
         );
 
-        $statement->execute([
-            'found_id_id' => $foundDocumentId,
-        ]);
+        $statement->execute($parameters);
 
-        $request = $statement->fetch(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
 
-        return is_array($request)
-            ? $request
-            : null;
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Find all recovery requests for a lost document.
+     * Find a request by lost document.
      */
     public function findByLostDocument(
         string $lostDocumentId
-    ): array {
-        $lostDocumentId = trim($lostDocumentId);
-
-        if ($lostDocumentId === '') {
-            return [];
-        }
-
-        $statement = $this->database->prepare(
+    ): ?array {
+        $statement = $this->db->prepare(
             <<<'SQL'
-            SELECT
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
-            FROM recovery_requests
-            WHERE lost_id_id = :lost_id_id
-            ORDER BY requested_at DESC
+                SELECT
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM recovery_requests
+                WHERE lost_document_id = :lost_document_id
+                ORDER BY requested_at DESC
+                LIMIT 1
             SQL
         );
 
         $statement->execute([
-            'lost_id_id' => $lostDocumentId,
+            'lost_document_id' => $lostDocumentId,
         ]);
 
-        return $statement->fetchAll(PDO::FETCH_ASSOC);
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return $row !== false ? $row : null;
     }
 
     /**
-     * Find recovery requests belonging to an owner account.
+     * Find requests belonging to a user.
      */
     public function findByOwnerUser(
-        string $ownerUserId
+        string $ownerUserId,
+        int $limit = 100
     ): array {
-        $ownerUserId = trim($ownerUserId);
+        $limit = $this->normalizeLimit($limit);
 
-        if ($ownerUserId === '') {
-            return [];
-        }
-
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
-            FROM recovery_requests
-            WHERE owner_user_id = :owner_user_id
-            ORDER BY requested_at DESC
+        $statement = $this->db->prepare(
+            <<<SQL
+                SELECT
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM recovery_requests
+                WHERE owner_user_id = :owner_user_id
+                ORDER BY requested_at DESC
+                LIMIT {$limit}
             SQL
         );
 
@@ -376,36 +329,35 @@ final class RecoveryRequest
     }
 
     /**
-     * Find recovery requests using the owner's phone number.
+     * Find requests using the owner's phone number.
      */
     public function findByOwnerPhone(
-        string $ownerPhone
+        string $ownerPhone,
+        int $limit = 100
     ): array {
         $ownerPhone = $this->normalizePhone($ownerPhone);
+        $limit = $this->normalizeLimit($limit);
 
-        if ($ownerPhone === '') {
-            return [];
-        }
-
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT
-                id,
-                lost_id_id,
-                found_id_id,
-                owner_user_id,
-                owner_phone,
-                status,
-                requested_at,
-                paid_at,
-                contact_released_at,
-                completed_at,
-                expires_at,
-                created_at,
-                updated_at
-            FROM recovery_requests
-            WHERE owner_phone = :owner_phone
-            ORDER BY requested_at DESC
+        $statement = $this->db->prepare(
+            <<<SQL
+                SELECT
+                    id,
+                    lost_document_id,
+                    found_document_id,
+                    owner_user_id,
+                    owner_phone,
+                    status,
+                    requested_at,
+                    paid_at,
+                    contact_released_at,
+                    completed_at,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM recovery_requests
+                WHERE owner_phone = :owner_phone
+                ORDER BY requested_at DESC
+                LIMIT {$limit}
             SQL
         );
 
@@ -417,51 +369,35 @@ final class RecoveryRequest
     }
 
     /**
-     * Update recovery request status.
+     * Update request status.
      */
     public function updateStatus(
         string $id,
         string $status
     ): bool {
-        $id = trim($id);
-        $status = trim($status);
+        $allowedStatuses = [
+            'pending',
+            'notified',
+            'payment_pending',
+            'paid',
+            'contact_released',
+            'completed',
+            'cancelled',
+            'expired',
+        ];
 
-        if ($id === '') {
+        if (!in_array($status, $allowedStatuses, true)) {
             throw new RuntimeException(
-                'Recovery request ID is required.'
+                'Invalid recovery request status.'
             );
         }
 
-        $this->assertStatus($status);
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE recovery_requests
-            SET
-                status = :status,
-                paid_at = CASE
-                    WHEN :status = 'paid'
-                    THEN COALESCE(paid_at, CURRENT_TIMESTAMP)
-                    ELSE paid_at
-                END,
-                contact_released_at = CASE
-                    WHEN :status = 'contact_released'
-                    THEN COALESCE(
-                        contact_released_at,
-                        CURRENT_TIMESTAMP
-                    )
-                    ELSE contact_released_at
-                END,
-                completed_at = CASE
-                    WHEN :status = 'completed'
-                    THEN COALESCE(
-                        completed_at,
-                        CURRENT_TIMESTAMP
-                    )
-                    ELSE completed_at
-                END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = :id
+                UPDATE recovery_requests
+                SET status = :status
+                WHERE id = :id
+                RETURNING id
             SQL
         );
 
@@ -470,11 +406,11 @@ final class RecoveryRequest
             'status' => $status,
         ]);
 
-        return $statement->rowCount() > 0;
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Mark owner notification as completed.
+     * Mark owner notification as sent.
      */
     public function markNotified(
         string $id
@@ -498,42 +434,84 @@ final class RecoveryRequest
     }
 
     /**
-     * Mark recovery payment as verified.
+     * Mark recovery payment as completed.
      */
     public function markPaid(
         string $id
     ): bool {
-        return $this->updateStatus(
-            $id,
-            'paid'
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE recovery_requests
+                SET
+                    status = 'paid',
+                    paid_at = COALESCE(paid_at, NOW())
+                WHERE id = :id
+                  AND status IN ('pending', 'notified', 'payment_pending')
+                RETURNING id
+            SQL
         );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Release finder contact information.
-     *
-     * The service layer must ensure payment has been
-     * verified before calling this method.
+     * Release verified contact information.
      */
     public function markContactReleased(
         string $id
     ): bool {
-        return $this->updateStatus(
-            $id,
-            'contact_released'
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE recovery_requests
+                SET
+                    status = 'contact_released',
+                    contact_released_at = COALESCE(
+                        contact_released_at,
+                        NOW()
+                    )
+                WHERE id = :id
+                  AND status = 'paid'
+                RETURNING id
+            SQL
         );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Mark the recovery as successfully completed.
+     * Mark the recovery as completed after handover.
      */
     public function markCompleted(
         string $id
     ): bool {
-        return $this->updateStatus(
-            $id,
-            'completed'
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                UPDATE recovery_requests
+                SET
+                    status = 'completed',
+                    completed_at = COALESCE(
+                        completed_at,
+                        NOW()
+                    )
+                WHERE id = :id
+                  AND status IN ('paid', 'contact_released')
+                RETURNING id
+            SQL
         );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+
+        return $statement->fetchColumn() !== false;
     }
 
     /**
@@ -542,26 +520,17 @@ final class RecoveryRequest
     public function cancel(
         string $id
     ): bool {
-        $id = trim($id);
-
-        if ($id === '') {
-            throw new RuntimeException(
-                'Recovery request ID is required.'
-            );
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE recovery_requests
-            SET
-                status = 'cancelled',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = :id
-              AND status NOT IN (
-                  'completed',
-                  'cancelled',
-                  'expired'
-              )
+                UPDATE recovery_requests
+                SET status = 'cancelled'
+                WHERE id = :id
+                  AND status IN (
+                      'pending',
+                      'notified',
+                      'payment_pending'
+                  )
+                RETURNING id
             SQL
         );
 
@@ -569,205 +538,94 @@ final class RecoveryRequest
             'id' => $id,
         ]);
 
-        return $statement->rowCount() > 0;
+        return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Expire a request only when its expiry time has passed.
+     * Expire an overdue recovery request.
      */
     public function expire(
         string $id
     ): bool {
-        $id = trim($id);
-
-        if ($id === '') {
-            throw new RuntimeException(
-                'Recovery request ID is required.'
-            );
-        }
-
-        $statement = $this->database->prepare(
+        $statement = $this->db->prepare(
             <<<'SQL'
-            UPDATE recovery_requests
-            SET
-                status = 'expired',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = :id
-              AND status NOT IN (
-                  'completed',
-                  'cancelled',
-                  'expired'
-              )
-              AND expires_at IS NOT NULL
-              AND expires_at <= CURRENT_TIMESTAMP
+                UPDATE recovery_requests
+                SET status = 'expired'
+                WHERE id = :id
+                  AND expires_at <= NOW()
+                  AND status IN (
+                      'pending',
+                      'notified',
+                      'payment_pending'
+                  )
+                RETURNING id
             SQL
         );
 
         $statement->execute([
             'id' => $id,
-        ]);
-
-        return $statement->rowCount() > 0;
-    }
-
-    /**
-     * Check whether a request belongs to an owner account.
-     */
-    public function belongsToUser(
-        string $id,
-        string $ownerUserId
-    ): bool {
-        $id = trim($id);
-        $ownerUserId = trim($ownerUserId);
-
-        if ($id === '' || $ownerUserId === '') {
-            return false;
-        }
-
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT 1
-            FROM recovery_requests
-            WHERE id = :id
-              AND owner_user_id = :owner_user_id
-            LIMIT 1
-            SQL
-        );
-
-        $statement->execute([
-            'id' => $id,
-            'owner_user_id' => $ownerUserId,
         ]);
 
         return $statement->fetchColumn() !== false;
     }
 
     /**
-     * Determine whether a request is still active.
+     * Check whether the request belongs to a user.
+     */
+    public function belongsToUser(
+        string $id,
+        string $userId
+    ): bool {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM recovery_requests
+                WHERE id = :id
+                  AND owner_user_id = :user_id
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+            'user_id' => $userId,
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * Determine whether the request is currently active.
      */
     public function isActive(
         string $id
     ): bool {
-        $id = trim($id);
+        $placeholders = $this->statusPlaceholders(
+            self::ACTIVE_STATUSES
+        );
 
-        if ($id === '') {
-            return false;
+        $parameters = [
+            'id' => $id,
+        ];
+
+        foreach (self::ACTIVE_STATUSES as $index => $status) {
+            $parameters['status_' . $index] = $status;
         }
 
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT 1
-            FROM recovery_requests
-            WHERE id = :id
-              AND status NOT IN (
-                  'completed',
-                  'cancelled',
-                  'expired'
-              )
-              AND (
-                  expires_at IS NULL
-                  OR expires_at > CURRENT_TIMESTAMP
-              )
-            LIMIT 1
+        $statement = $this->db->prepare(
+            <<<SQL
+                SELECT 1
+                FROM recovery_requests
+                WHERE id = :id
+                  AND status IN ({$placeholders})
+                  AND expires_at > NOW()
+                LIMIT 1
             SQL
         );
 
-        $statement->execute([
-            'id' => $id,
-        ]);
+        $statement->execute($parameters);
 
         return $statement->fetchColumn() !== false;
-    }
-
-    /**
-     * Verify that the found document exists.
-     */
-    private function assertFoundDocumentExists(
-        string $id
-    ): void {
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT 1
-            FROM found_documents
-            WHERE id = :id
-            LIMIT 1
-            SQL
-        );
-
-        $statement->execute([
-            'id' => $id,
-        ]);
-
-        if ($statement->fetchColumn() === false) {
-            throw new RuntimeException(
-                'Found document was not found.'
-            );
-        }
-    }
-
-    /**
-     * Verify that the lost document exists.
-     */
-    private function assertLostDocumentExists(
-        string $id
-    ): void {
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT 1
-            FROM lost_documents
-            WHERE id = :id
-            LIMIT 1
-            SQL
-        );
-
-        $statement->execute([
-            'id' => $id,
-        ]);
-
-        if ($statement->fetchColumn() === false) {
-            throw new RuntimeException(
-                'Lost document was not found.'
-            );
-        }
-    }
-
-    /**
-     * Verify that the owner account exists.
-     */
-    private function assertUserExists(
-        string $id
-    ): void {
-        $statement = $this->database->prepare(
-            <<<'SQL'
-            SELECT 1
-            FROM users
-            WHERE id = :id
-            LIMIT 1
-            SQL
-        );
-
-        $statement->execute([
-            'id' => $id,
-        ]);
-
-        if ($statement->fetchColumn() === false) {
-            throw new RuntimeException(
-                'Owner user was not found.'
-            );
-        }
-    }
-
-    /**
-     * Validate the recovery request status.
-     */
-    private function assertStatus(
-        string $status
-    ): void {
-        if (!in_array($status, self::STATUSES, true)) {
-            throw new RuntimeException(
-                'Invalid recovery request status.'
-            );
-        }
     }
 
     /**
@@ -776,34 +634,130 @@ final class RecoveryRequest
     private function normalizePhone(
         string $phone
     ): string {
-        $phone = trim($phone);
-
-        if ($phone === '') {
-            return '';
-        }
-
         $phone = preg_replace(
-            '/[\s\-\(\)]/',
+            '/[\s().-]+/',
             '',
-            $phone
-        ) ?? '';
+            trim($phone)
+        );
 
-        if (str_starts_with($phone, '00')) {
-            $phone = '+' . substr($phone, 2);
+        if ($phone === null || $phone === '') {
+            throw new RuntimeException(
+                'Phone number is required.'
+            );
         }
 
-        if (str_starts_with($phone, '0')) {
-            $phone = '+254' . substr($phone, 1);
+        if (str_starts_with($phone, '+254')) {
+            $normalized = $phone;
         } elseif (str_starts_with($phone, '254')) {
-            $phone = '+' . $phone;
-        }
-
-        if (!preg_match('/^\+2547\d{8}$/', $phone)) {
+            $normalized = '+' . $phone;
+        } elseif (
+            str_starts_with($phone, '07') ||
+            str_starts_with($phone, '01')
+        ) {
+            $normalized = '+254' . substr($phone, 1);
+        } else {
             throw new RuntimeException(
                 'Invalid Kenyan phone number.'
             );
         }
 
-        return $phone;
+        if (!preg_match(
+            '/^\+254(?:7|1)\d{8}$/',
+            $normalized
+        )) {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Ensure the lost document exists.
+     */
+    private function assertLostDocumentExists(
+        string $id
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM lost_documents
+                WHERE id = :id
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+
+        if ($statement->fetchColumn() === false) {
+            throw new RuntimeException(
+                'Lost document not found.'
+            );
+        }
+    }
+
+    /**
+     * Ensure the found document exists.
+     */
+    private function assertFoundDocumentExists(
+        string $id
+    ): void {
+        $statement = $this->db->prepare(
+            <<<'SQL'
+                SELECT 1
+                FROM found_documents
+                WHERE id = :id
+                LIMIT 1
+            SQL
+        );
+
+        $statement->execute([
+            'id' => $id,
+        ]);
+
+        if ($statement->fetchColumn() === false) {
+            throw new RuntimeException(
+                'Found document not found.'
+            );
+        }
+    }
+
+    /**
+     * Build named placeholders for an IN clause.
+     *
+     * Values remain bound parameters; no user input is
+     * interpolated into SQL.
+     */
+    private function statusPlaceholders(
+        array $statuses
+    ): string {
+        $placeholders = [];
+
+        foreach ($statuses as $index => $status) {
+            $placeholders[] = ':status_' . $index;
+        }
+
+        return implode(', ', $placeholders);
+    }
+
+    /**
+     * Keep query limits within a safe range.
+     */
+    private function normalizeLimit(
+        int $limit
+    ): int {
+        return max(1, min($limit, 500));
+    }
+
+    /**
+     * Detect PostgreSQL unique/exclusion conflicts.
+     */
+    private function isDuplicateActiveRequestError(
+        \PDOException $exception
+    ): bool {
+        return $exception->getCode() === '23505';
     }
 }
