@@ -4,457 +4,347 @@ declare(strict_types=1);
 
 namespace ScanId\Controllers;
 
+use PDO;
 use ScanId\Http\AuthMiddleware;
 use ScanId\Http\Request;
 use ScanId\Http\Response;
-use ScanId\Models\Handover;
-use ScanId\Models\RecoveryRequest;
-use Throwable;
+use ScanId\Services\HandoverService;
 
 final class HandoverController
 {
-    /**
-     * Create a safe handover record for a recovery request.
-     */
-    public static function create(): void
+    private HandoverService $service;
+
+    public function __construct(PDO $connection)
     {
-        try {
-            $user = AuthMiddleware::requireUser();
-
-            $data = Request::json();
-
-            $recoveryRequestId = self::requiredString(
-                $data,
-                'recovery_request_id'
-            );
-
-            $recovery = RecoveryRequest::findById(
-                $recoveryRequestId
-            );
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            self::assertOwner(
-                $recovery,
-                (string) $user['id']
-            );
-
-            if (
-                !in_array(
-                    $recovery['status'] ?? '',
-                    [
-                        'paid',
-                        'contact_released',
-                    ],
-                    true
-                )
-            ) {
-                Response::error(
-                    'Handover cannot be created before payment and recovery verification.',
-                    409
-                );
-            }
-
-            $existing = Handover::findByRecoveryRequest(
-                $recoveryRequestId
-            );
-
-            if ($existing !== null) {
-                Response::success(
-                    [
-                        'handover' => self::publicHandover($existing),
-                    ],
-                    'A handover record already exists.'
-                );
-            }
-
-            $safeLocation = self::optionalString(
-                $data,
-                'safe_location'
-            );
-
-            $scheduledAt = self::optionalString(
-                $data,
-                'scheduled_at'
-            );
-
-            $notes = self::optionalString(
-                $data,
-                'notes'
-            );
-
-            $handover = Handover::create(
-                $recoveryRequestId,
-                $safeLocation,
-                $scheduledAt,
-                $notes
-            );
-
-            Response::success(
-                [
-                    'handover' => self::publicHandover($handover),
-                ],
-                'Safe handover created successfully.',
-                201
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
-        }
+        $this->service = new HandoverService($connection);
     }
 
     /**
-     * Show a handover belonging to the authenticated user's recovery.
+     * Create a handover record for a paid recovery.
+     *
+     * POST /api/handovers
      */
-    public static function show(): void
+    public function create(): void
     {
-        try {
-            $user = AuthMiddleware::requireUser();
+        $user = AuthMiddleware::requireUser();
 
-            $id = self::routeId();
+        $recoveryRequestId = Request::input('recovery_request_id');
+        $safeLocation = Request::input('safe_location');
+        $scheduledAt = Request::input('scheduled_at');
+        $notes = Request::input('notes');
 
-            $handover = Handover::findById($id);
-
-            if ($handover === null) {
-                Response::error(
-                    'Handover not found.',
-                    404
-                );
-            }
-
-            $recoveryRequestId =
-                $handover['recovery_request_id'] ?? null;
-
-            if (!is_string($recoveryRequestId)) {
-                Response::error(
-                    'Handover recovery request is invalid.',
-                    500
-                );
-            }
-
-            $recovery = RecoveryRequest::findById(
-                $recoveryRequestId
+        if (!is_string($recoveryRequestId) || $recoveryRequestId === '') {
+            Response::error(
+                'recovery_request_id is required.',
+                422
             );
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            self::assertOwner(
-                $recovery,
-                (string) $user['id']
-            );
-
-            Response::success(
-                [
-                    'handover' => self::publicHandover($handover),
-                ]
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
         }
+
+        $handover = $this->service->create(
+            $recoveryRequestId,
+            $user['id'],
+            is_string($safeLocation) ? $safeLocation : null,
+            is_string($scheduledAt) ? $scheduledAt : null,
+            is_string($notes) ? $notes : null
+        );
+
+        Response::success(
+            $this->publicHandover($handover),
+            'Handover created successfully.',
+            201
+        );
+    }
+
+    /**
+     * Show a handover owned by the authenticated recovery owner.
+     *
+     * GET /api/handovers/{id}
+     */
+    public function show(): void
+    {
+        $user = AuthMiddleware::requireUser();
+
+        $handoverId = $this->routeId();
+
+        $handover = $this->service->findForOwner(
+            $handoverId,
+            $user['id']
+        );
+
+        Response::success(
+            $this->publicHandover($handover),
+            'Handover retrieved successfully.'
+        );
     }
 
     /**
      * Schedule a handover.
-     */
-    public static function schedule(): void
-    {
-        try {
-            $user = AuthMiddleware::requireUser();
-
-            $id = self::routeId();
-
-            $data = Request::json();
-
-            $handover = Handover::findById($id);
-
-            if ($handover === null) {
-                Response::error(
-                    'Handover not found.',
-                    404
-                );
-            }
-
-            $recoveryRequestId =
-                $handover['recovery_request_id'] ?? null;
-
-            if (!is_string($recoveryRequestId)) {
-                Response::error(
-                    'Handover recovery request is invalid.',
-                    500
-                );
-            }
-
-            $recovery = RecoveryRequest::findById(
-                $recoveryRequestId
-            );
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            self::assertOwner(
-                $recovery,
-                (string) $user['id']
-            );
-
-            $scheduledAt = self::requiredString(
-                $data,
-                'scheduled_at'
-            );
-
-            $updated = Handover::schedule(
-                $id,
-                $scheduledAt
-            );
-
-            Response::success(
-                [
-                    'handover' => self::publicHandover($updated),
-                ],
-                'Handover scheduled successfully.'
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
-        }
-    }
-
-    /**
-     * Grant finder consent for the handover.
-     */
-    public static function grantFinderConsent(): void
-    {
-        try {
-            $user = AuthMiddleware::requireUser();
-
-            $id = self::routeId();
-
-            $handover = Handover::findById($id);
-
-            if ($handover === null) {
-                Response::error(
-                    'Handover not found.',
-                    404
-                );
-            }
-
-            $recoveryRequestId =
-                $handover['recovery_request_id'] ?? null;
-
-            if (!is_string($recoveryRequestId)) {
-                Response::error(
-                    'Handover recovery request is invalid.',
-                    500
-                );
-            }
-
-            $recovery = RecoveryRequest::findById(
-                $recoveryRequestId
-            );
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            self::assertOwner(
-                $recovery,
-                (string) $user['id']
-            );
-
-            $updated = Handover::grantFinderConsent($id);
-
-            Response::success(
-                [
-                    'handover' => self::publicHandover($updated),
-                ],
-                'Finder consent recorded.'
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
-        }
-    }
-
-    /**
-     * Complete a handover.
      *
-     * The final handover verification will later be strengthened
-     * with recovery-token validation before this operation is allowed.
+     * PATCH /api/handovers/{id}/schedule
      */
-    public static function complete(): void
+    public function schedule(): void
     {
-        try {
-            $user = AuthMiddleware::requireUser();
+        $user = AuthMiddleware::requireUser();
 
-            $id = self::routeId();
+        $handoverId = $this->routeId();
+        $scheduledAt = Request::input('scheduled_at');
 
-            $handover = Handover::findById($id);
-
-            if ($handover === null) {
-                Response::error(
-                    'Handover not found.',
-                    404
-                );
-            }
-
-            $recoveryRequestId =
-                $handover['recovery_request_id'] ?? null;
-
-            if (!is_string($recoveryRequestId)) {
-                Response::error(
-                    'Handover recovery request is invalid.',
-                    500
-                );
-            }
-
-            $recovery = RecoveryRequest::findById(
-                $recoveryRequestId
+        if (!is_string($scheduledAt) || trim($scheduledAt) === '') {
+            Response::error(
+                'scheduled_at is required.',
+                422
             );
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            self::assertOwner(
-                $recovery,
-                (string) $user['id']
-            );
-
-            if (
-                !in_array(
-                    $recovery['status'] ?? '',
-                    [
-                        'paid',
-                        'contact_released',
-                    ],
-                    true
-                )
-            ) {
-                Response::error(
-                    'Recovery is not ready for handover completion.',
-                    409
-                );
-            }
-
-            if (
-                !Handover::hasFinderConsent($id)
-            ) {
-                Response::error(
-                    'Finder consent is required before completing handover.',
-                    409
-                );
-            }
-
-            $updated = Handover::complete($id);
-
-            RecoveryRequest::markCompleted(
-                $recoveryRequestId
-            );
-
-            Response::success(
-                [
-                    'handover' => self::publicHandover($updated),
-                    'recovery_status' => 'completed',
-                ],
-                'Handover completed successfully.'
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
         }
+
+        $handover = $this->service->schedule(
+            $handoverId,
+            $user['id'],
+            $scheduledAt
+        );
+
+        Response::success(
+            $this->publicHandover($handover),
+            'Handover scheduled successfully.'
+        );
+    }
+
+    /**
+     * Update safe handover location.
+     *
+     * PATCH /api/handovers/{id}/location
+     */
+    public function updateLocation(): void
+    {
+        $user = AuthMiddleware::requireUser();
+
+        $handoverId = $this->routeId();
+        $safeLocation = Request::input('safe_location');
+
+        if (!is_string($safeLocation) || trim($safeLocation) === '') {
+            Response::error(
+                'safe_location is required.',
+                422
+            );
+        }
+
+        $handover = $this->service->updateLocation(
+            $handoverId,
+            $user['id'],
+            $safeLocation
+        );
+
+        Response::success(
+            $this->publicHandover($handover),
+            'Handover location updated successfully.'
+        );
+    }
+
+    /**
+     * Update handover notes.
+     *
+     * PATCH /api/handovers/{id}/notes
+     */
+    public function updateNotes(): void
+    {
+        $user = AuthMiddleware::requireUser();
+
+        $handoverId = $this->routeId();
+        $notes = Request::input('notes');
+
+        if ($notes !== null && !is_string($notes)) {
+            Response::error(
+                'notes must be a string or null.',
+                422
+            );
+        }
+
+        $handover = $this->service->updateNotes(
+            $handoverId,
+            $user['id'],
+            $notes
+        );
+
+        Response::success(
+            $this->publicHandover($handover),
+            'Handover notes updated successfully.'
+        );
+    }
+
+    /**
+     * Create a one-time handover token.
+     *
+     * The raw token is returned only once.
+     * It must never be stored by the frontend as a permanent credential.
+     *
+     * POST /api/handovers/{id}/token
+     */
+    public function createToken(): void
+    {
+        $user = AuthMiddleware::requireUser();
+
+        $handoverId = $this->routeId();
+
+        $expiresInSeconds = Request::input('expires_in_seconds');
+
+        if ($expiresInSeconds === null) {
+            $expiresInSeconds = 1800;
+        }
+
+        if (
+            !is_int($expiresInSeconds) &&
+            !is_numeric($expiresInSeconds)
+        ) {
+            Response::error(
+                'expires_in_seconds must be a number.',
+                422
+            );
+        }
+
+        $expiresInSeconds = (int) $expiresInSeconds;
+
+        if (
+            $expiresInSeconds < 300 ||
+            $expiresInSeconds > 86400
+        ) {
+            Response::error(
+                'expires_in_seconds must be between 300 and 86400.',
+                422
+            );
+        }
+
+        $token = $this->service->createHandoverToken(
+            $handoverId,
+            $user['id'],
+            $expiresInSeconds
+        );
+
+        Response::success(
+            [
+                'token' => $token['token'],
+                'token_type' => $token['token_type'],
+                'expires_at' => $token['expires_at'],
+                'handover_id' => $handoverId,
+            ],
+            'Secure handover token created. Keep it private.'
+        );
+    }
+
+    /**
+     * Finder grants contact/handover consent using a secure token.
+     *
+     * No owner authentication is required here because the token
+     * is the temporary credential delivered to the finder.
+     *
+     * POST /api/handovers/{id}/finder-consent
+     */
+    public function grantFinderConsent(): void
+    {
+        $handoverId = $this->routeId();
+
+        $token = Request::input('token');
+
+        if (!is_string($token) || trim($token) === '') {
+            Response::error(
+                'Secure handover token is required.',
+                422
+            );
+        }
+
+        $handover = $this->service->grantFinderConsent(
+            $handoverId,
+            $token
+        );
+
+        Response::success(
+            $this->publicHandover($handover),
+            'Finder consent recorded successfully.'
+        );
+    }
+
+    /**
+     * Complete the handover.
+     *
+     * The authenticated owner must also provide the secure
+     * handover token.
+     *
+     * POST /api/handovers/{id}/complete
+     */
+    public function complete(): void
+    {
+        $user = AuthMiddleware::requireUser();
+
+        $handoverId = $this->routeId();
+
+        $token = Request::input('token');
+
+        if (!is_string($token) || trim($token) === '') {
+            Response::error(
+                'Secure handover token is required.',
+                422
+            );
+        }
+
+        $result = $this->service->complete(
+            $handoverId,
+            $user['id'],
+            $token
+        );
+
+        Response::success(
+            [
+                'handover' => $this->publicHandover(
+                    $result['handover']
+                ),
+                'recovery' => $result['recovery'],
+            ],
+            'Handover completed successfully. Recovery marked as recovered.'
+        );
     }
 
     /**
      * Cancel a handover.
+     *
+     * POST /api/handovers/{id}/cancel
      */
-    public static function cancel(): void
+    public function cancel(): void
     {
-        try {
-            $user = AuthMiddleware::requireUser();
+        $user = AuthMiddleware::requireUser();
 
-            $id = self::routeId();
+        $handoverId = $this->routeId();
 
-            $handover = Handover::findById($id);
+        $handover = $this->service->cancel(
+            $handoverId,
+            $user['id']
+        );
 
-            if ($handover === null) {
-                Response::error(
-                    'Handover not found.',
-                    404
-                );
-            }
-
-            $recoveryRequestId =
-                $handover['recovery_request_id'] ?? null;
-
-            if (!is_string($recoveryRequestId)) {
-                Response::error(
-                    'Handover recovery request is invalid.',
-                    500
-                );
-            }
-
-            $recovery = RecoveryRequest::findById(
-                $recoveryRequestId
-            );
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            self::assertOwner(
-                $recovery,
-                (string) $user['id']
-            );
-
-            $updated = Handover::cancel($id);
-
-            Response::success(
-                [
-                    'handover' => self::publicHandover($updated),
-                ],
-                'Handover cancelled.'
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
-        }
+        Response::success(
+            $this->publicHandover($handover),
+            'Handover cancelled successfully.'
+        );
     }
 
-    private static function assertOwner(
-        array $recovery,
-        string $userId
-    ): void {
-        if (
-            !isset($recovery['owner_user_id'])
-            || (string) $recovery['owner_user_id'] !== $userId
-        ) {
+    /**
+     * Extract and validate route UUID.
+     */
+    private function routeId(): string
+    {
+        $id = Request::routeParam('id');
+
+        if (!is_string($id) || !$this->isUuid($id)) {
             Response::error(
-                'You are not allowed to manage this handover.',
-                403
+                'Invalid handover ID.',
+                422
             );
         }
+
+        return $id;
     }
 
-    private static function publicHandover(
-        array $handover
-    ): array {
+    /**
+     * Remove internal fields from handover responses.
+     */
+    private function publicHandover(array $handover): array
+    {
         return [
             'id' => $handover['id'] ?? null,
             'recovery_request_id' =>
@@ -478,93 +368,12 @@ final class HandoverController
         ];
     }
 
-    private static function requiredString(
-        array $data,
-        string $field
-    ): string {
-        $value = $data[$field] ?? null;
-
-        if (!is_string($value) || trim($value) === '') {
-            Response::error(
-                ucfirst(str_replace('_', ' ', $field))
-                . ' is required.',
-                422
-            );
-        }
-
-        return trim($value);
-    }
-
-    private static function optionalString(
-        array $data,
-        string $field
-    ): ?string {
-        $value = $data[$field] ?? null;
-
-        if ($value === null) {
-            return null;
-        }
-
-        if (!is_string($value)) {
-            Response::error(
-                ucfirst(str_replace('_', ' ', $field))
-                . ' must be a string.',
-                422
-            );
-        }
-
-        $value = trim($value);
-
-        return $value === '' ? null : $value;
-    }
-
-    private static function routeId(): string
+    private function isUuid(string $value): bool
     {
-        $id = Request::input('id');
-
-        if (!is_string($id) || trim($id) === '') {
-            Response::error(
-                'Handover ID is required.',
-                400
-            );
-        }
-
-        $id = trim($id);
-
-        if (
-            !preg_match(
-                '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/',
-                $id
-            )
-        ) {
-            Response::error(
-                'Invalid handover ID.',
-                400
-            );
-        }
-
-        return $id;
-    }
-
-    private static function handleException(
-        Throwable $exception
-    ): void {
-        if (
-            filter_var(
-                $_ENV['APP_DEBUG'] ?? false,
-                FILTER_VALIDATE_BOOLEAN
-            )
-        ) {
-            Response::error(
-                $exception->getMessage(),
-                400
-            );
-        }
-
-        Response::error(
-            'Unable to process the handover request.',
-            400
-        );
+        return preg_match(
+            '/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i',
+            $value
+        ) === 1;
     }
 
     private function __construct()
