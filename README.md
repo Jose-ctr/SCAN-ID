@@ -1,2 +1,2 @@
-# SCAN-ID
-Lost ID Recovery Network Kenya Scan found IDs, notify owners via SMS, secure M-Pesa recovery fee, and coordinate safe handover.
+SCAN-ID — Lost Document Recovery Network Kenya
+Supported documents include National ID, passport, driving licence, student ID, staff ID, bank/ATM card, insurance card, and other personal documents.
