@@ -4,121 +4,128 @@ declare(strict_types=1);
 
 namespace ScanId\Controllers;
 
+use ScanId\Config\Database;
 use ScanId\Http\AuthMiddleware;
 use ScanId\Http\Request;
 use ScanId\Http\Response;
 use ScanId\Models\RecoveryRequest;
-use ScanId\Services\LostDocumentService;
-use ScanId\Services\FoundDocumentService;
+use ScanId\Services\RecoveryService;
 use Throwable;
 
 final class RecoveryController
 {
     /**
-     * Create a recovery request for a matched lost/found document.
+     * Create a recovery request.
+     *
+     * RecoveryService performs the actual server-side
+     * document matching and authorization checks.
      */
     public static function create(): void
     {
+        $user = AuthMiddleware::requireUser();
+
+        $input = Request::input();
+
+        $lostDocumentId = trim(
+            (string) ($input['lost_document_id'] ?? '')
+        );
+
+        $foundDocumentId = trim(
+            (string) ($input['found_document_id'] ?? '')
+        );
+
+        if (!self::isUuid($lostDocumentId)) {
+            Response::error(
+                'A valid lost document ID is required.',
+                422
+            );
+        }
+
+        if (!self::isUuid($foundDocumentId)) {
+            Response::error(
+                'A valid found document ID is required.',
+                422
+            );
+        }
+
+        $ownerUserId = (string) ($user['id'] ?? '');
+
+        if (!self::isUuid($ownerUserId)) {
+            Response::error(
+                'Authenticated user session is invalid.',
+                401
+            );
+        }
+
         try {
-            $user = AuthMiddleware::requireUser();
+            $db = Database::connection();
 
-            $data = Request::json();
+            $service = new RecoveryService($db);
 
-            $lostDocumentId = self::requiredString(
-                $data,
-                'lost_document_id'
-            );
-
-            $foundDocumentId = self::requiredString(
-                $data,
-                'found_document_id'
-            );
-
-            $lostDocument = LostDocumentService::findById(
-                $lostDocumentId
-            );
-
-            if ($lostDocument === null) {
-                Response::error(
-                    'Lost document not found.',
-                    404
-                );
-            }
-
-            $foundDocument = FoundDocumentService::findById(
-                $foundDocumentId
-            );
-
-            if ($foundDocument === null) {
-                Response::error(
-                    'Found document not found.',
-                    404
-                );
-            }
-
-            if (
-                isset($lostDocument['owner_user_id'])
-                && (string) $lostDocument['owner_user_id']
-                    !== (string) $user['id']
-            ) {
-                Response::error(
-                    'You are not the owner of the lost document report.',
-                    403
-                );
-            }
-
-            $ownerPhone = $lostDocument['owner_phone'] ?? null;
-
-            if (!is_string($ownerPhone) || trim($ownerPhone) === '') {
-                Response::error(
-                    'Owner phone number is missing from the lost document report.',
-                    422
-                );
-            }
-
-            $existing = RecoveryRequest::findActiveByFoundDocument(
-                $foundDocumentId
-            );
-
-            if ($existing !== null) {
-                Response::success(
-                    [
-                        'recovery_request' => $existing,
-                    ],
-                    'An active recovery request already exists.'
-                );
-            }
-
-            $recovery = RecoveryRequest::create(
+            $recovery = $service->create(
                 $lostDocumentId,
                 $foundDocumentId,
-                (string) $user['id'],
-                $ownerPhone
+                $ownerUserId,
+                isset($input['owner_phone'])
+                    ? (string) $input['owner_phone']
+                    : null
             );
 
             Response::success(
                 [
-                    'recovery_request' => $recovery,
+                    'recovery' => self::publicRecovery(
+                        $recovery
+                    ),
+                    'message' =>
+                        'Document match verified and recovery request created.',
                 ],
-                'Recovery request created successfully.',
                 201
             );
         } catch (Throwable $exception) {
-            self::handleException($exception);
+            if (
+                $exception instanceof \RuntimeException
+            ) {
+                Response::error(
+                    $exception->getMessage(),
+                    422
+                );
+            }
+
+            Response::error(
+                'Unable to create the recovery request.',
+                500
+            );
         }
     }
 
     /**
-     * Show a recovery request owned by the authenticated user.
+     * Show one recovery request.
      */
     public static function show(): void
     {
+        $user = AuthMiddleware::requireUser();
+
+        $recoveryRequestId = trim(
+            (string) Request::routeParam(
+                'id'
+            )
+        );
+
+        if (!self::isUuid($recoveryRequestId)) {
+            Response::error(
+                'Invalid recovery request ID.',
+                422
+            );
+        }
+
         try {
-            $user = AuthMiddleware::requireUser();
+            $db = Database::connection();
 
-            $id = self::routeId();
+            $model = new RecoveryRequest($db);
 
-            $recovery = RecoveryRequest::findById($id);
+            $recovery = $model->findById(
+                $recoveryRequestId
+            );
 
             if ($recovery === null) {
                 Response::error(
@@ -128,23 +135,34 @@ final class RecoveryController
             }
 
             if (
-                isset($recovery['owner_user_id'])
-                && (string) $recovery['owner_user_id']
-                    !== (string) $user['id']
+                ($recovery['owner_user_id'] ?? null)
+                !== ($user['id'] ?? null)
             ) {
                 Response::error(
-                    'You are not allowed to access this recovery request.',
+                    'You are not authorized to view this recovery request.',
                     403
                 );
             }
 
-            Response::success(
-                [
-                    'recovery_request' => $recovery,
-                ]
-            );
+            Response::success([
+                'recovery' => self::publicRecovery(
+                    $recovery
+                ),
+            ]);
         } catch (Throwable $exception) {
-            self::handleException($exception);
+            if (
+                $exception instanceof \RuntimeException
+            ) {
+                Response::error(
+                    $exception->getMessage(),
+                    422
+                );
+            }
+
+            Response::error(
+                'Unable to load the recovery request.',
+                500
+            );
         }
     }
 
@@ -153,148 +171,173 @@ final class RecoveryController
      */
     public static function mine(): void
     {
+        $user = AuthMiddleware::requireUser();
+
+        $ownerUserId = (string) ($user['id'] ?? '');
+
+        if (!self::isUuid($ownerUserId)) {
+            Response::error(
+                'Authenticated user session is invalid.',
+                401
+            );
+        }
+
         try {
-            $user = AuthMiddleware::requireUser();
+            $db = Database::connection();
 
-            $recoveryRequests = RecoveryRequest::findByOwnerUser(
-                (string) $user['id']
+            $model = new RecoveryRequest($db);
+
+            $recoveries = $model->findByOwnerUser(
+                $ownerUserId
             );
 
-            Response::success(
-                [
-                    'recovery_requests' => $recoveryRequests,
-                    'count' => count($recoveryRequests),
-                ]
+            $publicRecoveries = array_map(
+                static function (array $recovery): array {
+                    return self::publicRecovery(
+                        $recovery
+                    );
+                },
+                $recoveries
             );
+
+            Response::success([
+                'recoveries' => $publicRecoveries,
+            ]);
         } catch (Throwable $exception) {
-            self::handleException($exception);
+            if (
+                $exception instanceof \RuntimeException
+            ) {
+                Response::error(
+                    $exception->getMessage(),
+                    422
+                );
+            }
+
+            Response::error(
+                'Unable to load recovery requests.',
+                500
+            );
         }
     }
 
     /**
-     * Cancel an active recovery request.
+     * Cancel a recovery request.
      */
     public static function cancel(): void
     {
-        try {
-            $user = AuthMiddleware::requireUser();
+        $user = AuthMiddleware::requireUser();
 
-            $id = self::routeId();
+        $recoveryRequestId = trim(
+            (string) Request::routeParam(
+                'id'
+            )
+        );
 
-            $recovery = RecoveryRequest::findById($id);
-
-            if ($recovery === null) {
-                Response::error(
-                    'Recovery request not found.',
-                    404
-                );
-            }
-
-            if (
-                isset($recovery['owner_user_id'])
-                && (string) $recovery['owner_user_id']
-                    !== (string) $user['id']
-            ) {
-                Response::error(
-                    'You are not allowed to cancel this recovery request.',
-                    403
-                );
-            }
-
-            if (
-                isset($recovery['status'])
-                && !in_array(
-                    $recovery['status'],
-                    [
-                        'pending',
-                        'notified',
-                        'payment_pending',
-                    ],
-                    true
-                )
-            ) {
-                Response::error(
-                    'This recovery request cannot be cancelled in its current state.',
-                    409
-                );
-            }
-
-            $updated = RecoveryRequest::cancel($id);
-
-            Response::success(
-                [
-                    'recovery_request' => $updated,
-                ],
-                'Recovery request cancelled.'
-            );
-        } catch (Throwable $exception) {
-            self::handleException($exception);
-        }
-    }
-
-    private static function requiredString(
-        array $data,
-        string $field
-    ): string {
-        $value = $data[$field] ?? null;
-
-        if (!is_string($value) || trim($value) === '') {
+        if (!self::isUuid($recoveryRequestId)) {
             Response::error(
-                ucfirst(str_replace('_', ' ', $field))
-                . ' is required.',
+                'Invalid recovery request ID.',
                 422
             );
         }
 
-        return trim($value);
+        $ownerUserId = (string) ($user['id'] ?? '');
+
+        if (!self::isUuid($ownerUserId)) {
+            Response::error(
+                'Authenticated user session is invalid.',
+                401
+            );
+        }
+
+        try {
+            $db = Database::connection();
+
+            $service = new RecoveryService($db);
+
+            $recovery = $service->cancel(
+                $recoveryRequestId,
+                $ownerUserId
+            );
+
+            Response::success([
+                'recovery' => self::publicRecovery(
+                    $recovery
+                ),
+                'message' =>
+                    'Recovery request cancelled.',
+            ]);
+        } catch (Throwable $exception) {
+            if (
+                $exception instanceof \RuntimeException
+            ) {
+                Response::error(
+                    $exception->getMessage(),
+                    422
+                );
+            }
+
+            Response::error(
+                'Unable to cancel the recovery request.',
+                500
+            );
+        }
     }
 
-    private static function routeId(): string
-    {
-        $id = Request::input('id');
+    /**
+     * Never expose document hashes, document numbers,
+     * finder phone numbers, or owner phone numbers.
+     */
+    private static function publicRecovery(
+        array $recovery
+    ): array {
+        return [
+            'id' => $recovery['id'] ?? null,
 
-        if (!is_string($id) || trim($id) === '') {
-            Response::error(
-                'Recovery request ID is required.',
-                400
-            );
-        }
+            'lost_document_id' =>
+                $recovery['lost_document_id'] ?? null,
 
-        $id = trim($id);
+            'found_document_id' =>
+                $recovery['found_document_id'] ?? null,
 
-        if (
-            !preg_match(
-                '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/',
-                $id
-            )
-        ) {
-            Response::error(
-                'Invalid recovery request ID.',
-                400
-            );
-        }
+            'status' =>
+                $recovery['status'] ?? null,
 
-        return $id;
+            'requested_at' =>
+                $recovery['requested_at'] ?? null,
+
+            'paid_at' =>
+                $recovery['paid_at'] ?? null,
+
+            'contact_released_at' =>
+                $recovery['contact_released_at'] ?? null,
+
+            'completed_at' =>
+                $recovery['completed_at'] ?? null,
+
+            'expires_at' =>
+                $recovery['expires_at'] ?? null,
+
+            'created_at' =>
+                $recovery['created_at'] ?? null,
+
+            'updated_at' =>
+                $recovery['updated_at'] ?? null,
+        ];
     }
 
-    private static function handleException(Throwable $exception): void
+    /**
+     * Validate UUID format.
+     */
+    private static function isUuid(string $value): bool
     {
-        if (
-            filter_var(
-                $_ENV['APP_DEBUG'] ?? false,
-                FILTER_VALIDATE_BOOLEAN
-            )
-        ) {
-            Response::error(
-                $exception->getMessage(),
-                400
-            );
-        }
-
-        Response::error(
-            'Unable to process the recovery request.',
-            400
-        );
+        return preg_match(
+            '/^[0-9a-fA-F]{8}-'
+            . '[0-9a-fA-F]{4}-'
+            . '[1-5][0-9a-fA-F]{3}-'
+            . '[89abAB][0-9a-fA-F]{3}-'
+            . '[0-9a-fA-F]{12}$/',
+            $value
+        ) === 1;
     }
 
     private function __construct()
