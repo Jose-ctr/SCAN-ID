@@ -9,23 +9,32 @@ use RuntimeException;
 final class App
 {
     /**
-     * Get the application name.
+     * Application name.
      */
     public static function name(): string
     {
-        return self::required('APP_NAME');
+        return self::required(
+            'APP_NAME',
+            'SCAN-ID'
+        );
     }
 
     /**
-     * Get the application environment.
+     * Application environment.
      */
     public static function environment(): string
     {
-        return $_ENV['APP_ENV'] ?? 'local';
+        return strtolower(
+            trim(
+                $_ENV['APP_ENV']
+                    ?? $_SERVER['APP_ENV']
+                    ?? 'production'
+            )
+        );
     }
 
     /**
-     * Determine whether the application is running in production.
+     * Whether the application is running in production.
      */
     public static function isProduction(): bool
     {
@@ -33,64 +42,60 @@ final class App
     }
 
     /**
-     * Determine whether debug mode is enabled.
+     * Application debug mode.
      */
     public static function debug(): bool
     {
         return filter_var(
-            $_ENV['APP_DEBUG'] ?? false,
+            $_ENV['APP_DEBUG']
+                ?? $_SERVER['APP_DEBUG']
+                ?? 'false',
             FILTER_VALIDATE_BOOLEAN
         );
     }
 
     /**
-     * Get the application URL.
+     * Public application URL.
      */
     public static function url(): string
     {
         return rtrim(
-            self::required('APP_URL'),
+            trim(
+                $_ENV['APP_URL']
+                    ?? $_SERVER['APP_URL']
+                    ?? 'http://localhost:8000'
+            ),
             '/'
         );
     }
 
     /**
-     * Get the application timezone.
+     * Application timezone.
      */
     public static function timezone(): string
     {
-        return $_ENV['APP_TIMEZONE'] ?? 'Africa/Nairobi';
+        return trim(
+            $_ENV['APP_TIMEZONE']
+                ?? $_SERVER['APP_TIMEZONE']
+                ?? 'Africa/Nairobi'
+        );
     }
 
     /**
-     * Get the configured recovery fee in Kenyan shillings.
+     * Total recovery payment in Kenya shillings.
+     *
+     * Owner pays KSh 300 total.
      */
-    public static function recoveryFee(): int
+    public static function recoveryFeeKes(): int
     {
-        $fee = filter_var(
-            $_ENV['RECOVERY_FEE_KES'] ?? 150,
-            FILTER_VALIDATE_INT
+        $value = self::integerEnv(
+            'RECOVERY_FEE_KES',
+            300
         );
 
-        if ($fee === false || $fee < 0) {
+        if ($value !== 300) {
             throw new RuntimeException(
-                'Invalid recovery fee configuration.'
-            );
-        }
-
-        return $fee;
-    }
-
-    /**
-     * Get a required environment variable.
-     */
-    private static function required(string $key): string
-    {
-        $value = $_ENV[$key] ?? '';
-
-        if ($value === '') {
-            throw new RuntimeException(
-                "Missing required environment variable: {$key}"
+                'RECOVERY_FEE_KES must be exactly 300.'
             );
         }
 
@@ -98,8 +103,117 @@ final class App
     }
 
     /**
-     * Prevent accidental instantiation.
+     * Finder reward in Kenya shillings.
      */
+    public static function finderRewardKes(): int
+    {
+        $value = self::integerEnv(
+            'FINDER_REWARD_KES',
+            150
+        );
+
+        if ($value !== 150) {
+            throw new RuntimeException(
+                'FINDER_REWARD_KES must be exactly 150.'
+            );
+        }
+
+        return $value;
+    }
+
+    /**
+     * SCAN-ID platform share in Kenya shillings.
+     */
+    public static function platformFeeKes(): int
+    {
+        $value = self::integerEnv(
+            'PLATFORM_FEE_KES',
+            150
+        );
+
+        if ($value !== 150) {
+            throw new RuntimeException(
+                'PLATFORM_FEE_KES must be exactly 150.'
+            );
+        }
+
+        return $value;
+    }
+
+    /**
+     * Validate the complete recovery payment breakdown.
+     */
+    public static function validateRecoveryPricing(): bool
+    {
+        $recovery = self::recoveryFeeKes();
+        $finder = self::finderRewardKes();
+        $platform = self::platformFeeKes();
+
+        if ($finder + $platform !== $recovery) {
+            throw new RuntimeException(
+                'Invalid SCAN-ID recovery pricing configuration.'
+            );
+        }
+
+        return true;
+    }
+
+    /**
+     * Read a required environment variable.
+     */
+    public static function required(
+        string $key,
+        ?string $default = null
+    ): string {
+        $value =
+            $_ENV[$key]
+            ?? $_SERVER[$key]
+            ?? $default;
+
+        if (
+            $value === null ||
+            trim((string) $value) === ''
+        ) {
+            throw new RuntimeException(
+                sprintf(
+                    'Required environment variable "%s" is missing.',
+                    $key
+                )
+            );
+        }
+
+        return trim((string) $value);
+    }
+
+    /**
+     * Read an integer environment variable.
+     */
+    private static function integerEnv(
+        string $key,
+        int $default
+    ): int {
+        $value =
+            $_ENV[$key]
+            ?? $_SERVER[$key]
+            ?? (string) $default;
+
+        if (
+            filter_var(
+                $value,
+                FILTER_VALIDATE_INT
+            ) === false
+        ) {
+            throw new RuntimeException(
+                sprintf(
+                    'Environment variable "%s" must be an integer.',
+                    $key
+                )
+            );
+        }
+
+        return (int) $value;
+    }
+
     private function __construct()
     {
     }
