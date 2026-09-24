@@ -4,23 +4,51 @@ declare(strict_types=1);
 
 namespace ScanId\Services;
 
+use PDO;
+use RuntimeException;
 use ScanId\Config\App;
-use ScanId\Config\Database;
 use ScanId\Models\RecoveryPayment;
 use ScanId\Models\RecoveryRequest;
-use RuntimeException;
 
 final class MpesaService
 {
-    private const RECOVERY_AMOUNT_KES = 300;
+    private const PROVIDER = 'mpesa';
 
-    public static function initiateRecoveryPayment(
+    private PDO $connection;
+    private RecoveryPayment $payment;
+    private RecoveryRequest $recoveryRequest;
+
+    public function __construct(PDO $connection)
+    {
+        $this->connection = $connection;
+        $this->payment = new RecoveryPayment($connection);
+        $this->recoveryRequest = new RecoveryRequest($connection);
+    }
+
+    /**
+     * Initiate the SCAN-ID recovery payment.
+     *
+     * The configured recovery amount must remain KSh 300.
+     */
+    public function initiateRecoveryPayment(
         string $recoveryRequestId,
         string $phone
     ): array {
+        $this->assertUuid($recoveryRequestId);
+
         $phone = self::normalizePhone($phone);
 
-        $recovery = RecoveryRequest::findById($recoveryRequestId);
+        $amount = App::recoveryFeeKes();
+
+        /*
+         * Validate the complete pricing configuration before
+         * starting any M-Pesa transaction.
+         */
+        App::validateRecoveryPricing();
+
+        $recovery = $this->recoveryRequest->findById(
+            $recoveryRequestId
+        );
 
         if ($recovery === null) {
             throw new RuntimeException(
@@ -30,7 +58,7 @@ final class MpesaService
 
         if (
             !in_array(
-                $recovery['status'] ?? '',
+                $recovery['status'] ?? null,
                 [
                     'pending',
                     'notified',
@@ -40,7 +68,7 @@ final class MpesaService
             )
         ) {
             throw new RuntimeException(
-                'Recovery request is not available for payment.'
+                'This recovery is not available for payment.'
             );
         }
 
@@ -48,156 +76,242 @@ final class MpesaService
             (string) ($recovery['owner_phone'] ?? '')
         );
 
-        if ($phone !== $ownerPhone) {
+        if ($ownerPhone !== $phone) {
             throw new RuntimeException(
-                'Payment phone number must match the recovery owner phone.'
+                'Payment phone number does not match the recovery owner.'
             );
         }
 
-        $existing = RecoveryPayment::findPendingByRecoveryRequest(
-            $recoveryRequestId
-        );
+        /*
+         * Reuse an existing pending payment when possible.
+         * This prevents duplicate STK requests when the user
+         * taps Pay more than once.
+         */
+        $existing = $this->payment
+            ->findPendingByRecoveryRequest(
+                $recoveryRequestId
+            );
 
-        if ($existing !== null) {
-            $checkoutRequestId = $existing['checkout_request_id'] ?? null;
-
-            if (
-                is_string($checkoutRequestId)
-                && trim($checkoutRequestId) !== ''
-            ) {
-                return [
-                    'payment' => $existing,
-                    'amount_kes' => self::RECOVERY_AMOUNT_KES,
-                    'status' => 'pending',
-                    'duplicate' => true,
-                ];
-            }
+        if (
+            $existing !== null &&
+            !empty($existing['checkout_request_id'])
+        ) {
+            return [
+                'payment' => $existing,
+                'amount_kes' => $amount,
+                'checkout_request_id' =>
+                    $existing['checkout_request_id'],
+                'customer_message' =>
+                    'A payment request is already pending. Check your phone.',
+                'breakdown' => [
+                    'finder_reward_kes' =>
+                        App::finderRewardKes(),
+                    'platform_kes' =>
+                        App::platformFeeKes(),
+                    'total_kes' => $amount,
+                ],
+            ];
         }
 
-        $payment = RecoveryPayment::create(
+        /*
+         * Create the local payment record first so the callback
+         * can always be correlated to a known recovery.
+         */
+        $payment = $this->payment->create(
             $recoveryRequestId,
             $phone
         );
 
-        $accessToken = self::accessToken();
+        try {
+            $accessToken = $this->accessToken();
 
-        $timestamp = date('YmdHis');
-
-        $shortcode = trim(
-            (string) ($_ENV['MPESA_SHORTCODE'] ?? '')
-        );
-
-        $passkey = trim(
-            (string) ($_ENV['MPESA_PASSKEY'] ?? '')
-        );
-
-        if ($shortcode === '' || $passkey === '') {
-            throw new RuntimeException(
-                'M-Pesa shortcode or passkey is not configured.'
+            $shortcode = App::required(
+                'MPESA_SHORTCODE'
             );
-        }
 
-        $password = base64_encode(
-            $shortcode . $passkey . $timestamp
-        );
-
-        $callbackUrl = trim(
-            (string) ($_ENV['MPESA_CALLBACK_URL'] ?? '')
-        );
-
-        if ($callbackUrl === '') {
-            throw new RuntimeException(
-                'M-Pesa callback URL is not configured.'
+            $passkey = App::required(
+                'MPESA_PASSKEY'
             );
-        }
 
-        $accountReference = 'SCANID-' .
-            strtoupper(
-                substr(
-                    str_replace('-', '', $recoveryRequestId),
-                    0,
-                    12
+            $callbackUrl = App::required(
+                'MPESA_CALLBACK_URL'
+            );
+
+            if (
+                !filter_var(
+                    $callbackUrl,
+                    FILTER_VALIDATE_URL
                 )
+            ) {
+                throw new RuntimeException(
+                    'MPESA_CALLBACK_URL is invalid.'
+                );
+            }
+
+            if (
+                !str_starts_with(
+                    strtolower($callbackUrl),
+                    'https://'
+                )
+            ) {
+                throw new RuntimeException(
+                    'MPESA_CALLBACK_URL must use HTTPS.'
+                );
+            }
+
+            $timestamp = gmdate('YmdHis');
+
+            $password = base64_encode(
+                $shortcode .
+                $passkey .
+                $timestamp
             );
 
-        $payload = [
-            'BusinessShortCode' => $shortcode,
-            'Password' => $password,
-            'Timestamp' => $timestamp,
-            'TransactionType' => 'CustomerPayBillOnline',
-            'Amount' => self::RECOVERY_AMOUNT_KES,
-            'PartyA' => $phone,
-            'PartyB' => $shortcode,
-            'PhoneNumber' => $phone,
-            'CallBackURL' => $callbackUrl,
-            'AccountReference' => $accountReference,
-            'TransactionDesc' => 'SCAN-ID document recovery',
-        ];
+            $accountReference =
+                'SCANID-' .
+                strtoupper(
+                    substr(
+                        str_replace(
+                            '-',
+                            '',
+                            $recoveryRequestId
+                        ),
+                        0,
+                        12
+                    )
+                );
 
-        $response = self::request(
-            'POST',
-            self::apiUrl('mpesa/stkpush/v1/processrequest'),
-            $accessToken,
-            $payload
-        );
+            $payload = [
+                'BusinessShortCode' =>
+                    $shortcode,
 
-        $responseCode = (string) (
-            $response['ResponseCode'] ?? ''
-        );
+                'Password' =>
+                    $password,
 
-        if ($responseCode !== '0') {
-            throw new RuntimeException(
-                'M-Pesa rejected the STK Push request.'
+                'Timestamp' =>
+                    $timestamp,
+
+                'TransactionType' =>
+                    'CustomerPayBillOnline',
+
+                'Amount' =>
+                    $amount,
+
+                'PartyA' =>
+                    $phone,
+
+                'PartyB' =>
+                    $shortcode,
+
+                'PhoneNumber' =>
+                    $phone,
+
+                'CallBackURL' =>
+                    $callbackUrl,
+
+                'AccountReference' =>
+                    $accountReference,
+
+                'TransactionDesc' =>
+                    'SCAN-ID document recovery',
+            ];
+
+            $response = $this->request(
+                'POST',
+                '/mpesa/stkpush/v1/processrequest',
+                $payload,
+                $accessToken
             );
+
+            $responseCode =
+                (string) (
+                    $response['ResponseCode']
+                    ?? ''
+                );
+
+            if ($responseCode !== '0') {
+                throw new RuntimeException(
+                    'M-Pesa payment request was rejected.'
+                );
+            }
+
+            $checkoutRequestId =
+                $response['CheckoutRequestID']
+                ?? null;
+
+            $merchantRequestId =
+                $response['MerchantRequestID']
+                ?? null;
+
+            if (
+                !is_string($checkoutRequestId) ||
+                trim($checkoutRequestId) === ''
+            ) {
+                throw new RuntimeException(
+                    'M-Pesa did not return a checkout request ID.'
+                );
+            }
+
+            $payment = $this->payment->setCheckoutDetails(
+                $payment['id'],
+                $checkoutRequestId,
+                is_string($merchantRequestId)
+                    ? $merchantRequestId
+                    : null
+            );
+
+            $this->recoveryRequest->markPaymentPending(
+                $recoveryRequestId
+            );
+
+            return [
+                'payment' => $payment,
+                'amount_kes' => $amount,
+                'checkout_request_id' =>
+                    $checkoutRequestId,
+                'customer_message' =>
+                    $response['CustomerMessage']
+                    ?? 'Check your phone and enter your M-Pesa PIN.',
+                'breakdown' => [
+                    'finder_reward_kes' =>
+                        App::finderRewardKes(),
+                    'platform_kes' =>
+                        App::platformFeeKes(),
+                    'total_kes' => $amount,
+                ],
+            ];
+        } catch (\Throwable $exception) {
+            /*
+             * The local payment was created before the provider
+             * request. If the provider request fails, do not leave
+             * it looking like a usable pending transaction.
+             */
+            $this->payment->markFailed(
+                $payment['id'],
+                $exception->getMessage()
+            );
+
+            throw $exception;
         }
-
-        $checkoutRequestId = trim(
-            (string) ($response['CheckoutRequestID'] ?? '')
-        );
-
-        $merchantRequestId = trim(
-            (string) ($response['MerchantRequestID'] ?? '')
-        );
-
-        if ($checkoutRequestId === '') {
-            throw new RuntimeException(
-                'M-Pesa did not return a checkout request ID.'
-            );
-        }
-
-        RecoveryPayment::setCheckoutDetails(
-            (string) $payment['id'],
-            $checkoutRequestId,
-            $merchantRequestId !== ''
-                ? $merchantRequestId
-                : null
-        );
-
-        RecoveryRequest::markPaymentPending(
-            $recoveryRequestId
-        );
-
-        $payment = RecoveryPayment::findById(
-            (string) $payment['id']
-        );
-
-        return [
-            'payment' => $payment,
-            'amount_kes' => self::RECOVERY_AMOUNT_KES,
-            'status' => 'pending',
-            'duplicate' => false,
-        ];
     }
 
     /**
-     * Process a successful Daraja callback.
+     * Process a Daraja STK callback.
      *
-     * Completion is idempotent through the payment model's
-     * unique M-Pesa receipt number.
+     * Callback verification is based on:
+     * - known CheckoutRequestID
+     * - successful ResultCode
+     * - exact payment amount
+     * - matching phone number
+     * - unique M-Pesa receipt
+     * - idempotent database update
      */
-    public static function processCallback(array $callback): array
-    {
-        $stkCallback = $callback['Body']['stkCallback'] ?? null;
+    public function processCallback(
+        array $callback
+    ): array {
+        $stkCallback =
+            $callback['Body']['stkCallback']
+            ?? null;
 
         if (!is_array($stkCallback)) {
             throw new RuntimeException(
@@ -205,157 +319,192 @@ final class MpesaService
             );
         }
 
-        $checkoutRequestId = trim(
-            (string) ($stkCallback['CheckoutRequestID'] ?? '')
-        );
+        $checkoutRequestId =
+            $stkCallback['CheckoutRequestID']
+            ?? null;
 
-        if ($checkoutRequestId === '') {
+        if (
+            !is_string($checkoutRequestId) ||
+            trim($checkoutRequestId) === ''
+        ) {
             throw new RuntimeException(
                 'M-Pesa callback is missing CheckoutRequestID.'
             );
         }
 
-        $resultCode = (int) (
-            $stkCallback['ResultCode'] ?? -1
-        );
-
-        $resultDescription = trim(
-            (string) (
-                $stkCallback['ResultDesc']
-                ?? 'M-Pesa transaction failed.'
-            )
-        );
-
-        $payment = self::findPaymentByCheckoutRequest(
-            $checkoutRequestId
-        );
+        $payment =
+            $this->findPaymentByCheckoutRequest(
+                $checkoutRequestId
+            );
 
         if ($payment === null) {
             throw new RuntimeException(
-                'No SCAN-ID payment matches the M-Pesa checkout request.'
+                'Payment associated with this callback was not found.'
             );
         }
 
+        $resultCode = (int) (
+            $stkCallback['ResultCode']
+            ?? -1
+        );
+
+        /*
+         * Non-zero result means the STK transaction failed,
+         * was cancelled, timed out, or otherwise did not complete.
+         */
         if ($resultCode !== 0) {
-            RecoveryPayment::markFailed(
-                (string) $payment['id'],
-                $resultCode,
-                $resultDescription
+            $description =
+                (string) (
+                    $stkCallback['ResultDesc']
+                    ?? 'M-Pesa payment failed.'
+                );
+
+            $this->payment->markFailed(
+                $payment['id'],
+                $description
             );
 
             return [
-                'success' => false,
-                'payment_id' => $payment['id'],
-                'status' => 'failed',
+                'completed' => false,
+                'payment' =>
+                    $this->payment->findById(
+                        $payment['id']
+                    ),
             ];
         }
 
-        $items = $stkCallback['CallbackMetadata']['Item'] ?? [];
+        $metadata = $this->metadataToArray(
+            $stkCallback['CallbackMetadata']
+                ?? []
+        );
 
-        if (!is_array($items)) {
+        $amount =
+            $metadata['Amount']
+            ?? null;
+
+        $receipt =
+            $metadata['MpesaReceiptNumber']
+            ?? null;
+
+        $callbackPhone =
+            $metadata['PhoneNumber']
+            ?? null;
+
+        $expectedAmount =
+            App::recoveryFeeKes();
+
+        if (
+            !is_numeric($amount) ||
+            (int) $amount !== $expectedAmount
+        ) {
+            $this->payment->markFailed(
+                $payment['id'],
+                'M-Pesa callback amount did not match the recovery amount.'
+            );
+
             throw new RuntimeException(
-                'M-Pesa callback metadata is missing.'
+                'M-Pesa callback amount does not match the recovery amount.'
             );
         }
 
-        $metadata = self::metadataToArray($items);
-
-        $amount = (int) round(
-            (float) ($metadata['Amount'] ?? 0)
-        );
-
-        $receipt = trim(
-            (string) ($metadata['MpesaReceiptNumber'] ?? '')
-        );
-
-        $phone = self::normalizePhone(
-            (string) ($metadata['PhoneNumber'] ?? '')
-        );
-
-        if ($amount !== self::RECOVERY_AMOUNT_KES) {
-            RecoveryPayment::markFailed(
-                (string) $payment['id'],
-                -2,
-                'Invalid recovery payment amount.'
+        if (
+            !is_string($receipt) ||
+            trim($receipt) === ''
+        ) {
+            $this->payment->markFailed(
+                $payment['id'],
+                'M-Pesa callback did not contain a receipt number.'
             );
 
-            throw new RuntimeException(
-                'Invalid M-Pesa payment amount.'
-            );
-        }
-
-        if ($receipt === '') {
             throw new RuntimeException(
                 'M-Pesa receipt number is missing.'
             );
         }
 
-        $expectedPhone = self::normalizePhone(
-            (string) ($payment['phone'] ?? '')
-        );
-
-        if ($phone !== $expectedPhone) {
-            RecoveryPayment::markFailed(
-                (string) $payment['id'],
-                -3,
-                'Payment phone number does not match the recovery request.'
+        if (
+            !is_numeric($callbackPhone) &&
+            !is_string($callbackPhone)
+        ) {
+            $this->payment->markFailed(
+                $payment['id'],
+                'M-Pesa callback did not contain a valid phone number.'
             );
 
             throw new RuntimeException(
-                'M-Pesa phone number does not match the recovery payment.'
+                'M-Pesa callback phone number is missing.'
             );
         }
 
-        $completed = RecoveryPayment::markCompleted(
-            (string) $payment['id'],
+        $callbackPhone =
+            self::normalizePhone(
+                (string) $callbackPhone
+            );
+
+        $paymentPhone =
+            self::normalizePhone(
+                (string) ($payment['phone'] ?? '')
+            );
+
+        if ($callbackPhone !== $paymentPhone) {
+            $this->payment->markFailed(
+                $payment['id'],
+                'M-Pesa callback phone did not match the payment phone.'
+            );
+
+            throw new RuntimeException(
+                'M-Pesa callback phone does not match the payment.'
+            );
+        }
+
+        /*
+         * markCompleted() is responsible for receipt uniqueness
+         * and idempotent completion.
+         */
+        $completed = $this->payment->markCompleted(
+            $payment['id'],
             $receipt,
-            $resultCode,
-            $resultDescription
+            $expectedAmount
         );
 
-        if ($completed === null) {
-            throw new RuntimeException(
-                'Unable to complete the SCAN-ID payment.'
-            );
-        }
+        $recoveryRequestId =
+            $payment['recovery_request_id'];
 
-        RecoveryRequest::markPaid(
-            (string) $payment['recovery_request_id']
+        $this->recoveryRequest->markPaid(
+            $recoveryRequestId
         );
 
         return [
-            'success' => true,
-            'payment_id' => $completed['id'],
-            'status' => 'completed',
-            'receipt' => $receipt,
+            'completed' => true,
+            'payment' => $completed,
+            'recovery_request_id' =>
+                $recoveryRequestId,
+            'amount_kes' =>
+                $expectedAmount,
         ];
     }
 
-    private static function accessToken(): string
+    /**
+     * Get the Daraja OAuth access token.
+     */
+    private function accessToken(): string
     {
-        $consumerKey = trim(
-            (string) ($_ENV['MPESA_CONSUMER_KEY'] ?? '')
+        $consumerKey = App::required(
+            'MPESA_CONSUMER_KEY'
         );
 
-        $consumerSecret = trim(
-            (string) ($_ENV['MPESA_CONSUMER_SECRET'] ?? '')
+        $consumerSecret = App::required(
+            'MPESA_CONSUMER_SECRET'
         );
-
-        if ($consumerKey === '' || $consumerSecret === '') {
-            throw new RuntimeException(
-                'M-Pesa consumer credentials are not configured.'
-            );
-        }
 
         $credentials = base64_encode(
-            $consumerKey . ':' . $consumerSecret
+            $consumerKey .
+            ':' .
+            $consumerSecret
         );
 
-        $response = self::request(
+        $response = $this->request(
             'GET',
-            self::apiUrl(
-                'oauth/v1/generate?grant_type=client_credentials'
-            ),
+            '/oauth/v1/generate?grant_type=client_credentials',
             null,
             null,
             [
@@ -363,11 +512,14 @@ final class MpesaService
             ]
         );
 
-        $token = trim(
-            (string) ($response['access_token'] ?? '')
-        );
+        $token =
+            $response['access_token']
+            ?? null;
 
-        if ($token === '') {
+        if (
+            !is_string($token) ||
+            trim($token) === ''
+        ) {
             throw new RuntimeException(
                 'M-Pesa access token was not returned.'
             );
@@ -376,13 +528,21 @@ final class MpesaService
         return $token;
     }
 
-    private static function request(
+    /**
+     * Perform an HTTP request to Daraja.
+     *
+     * Provider response bodies are never exposed directly
+     * to the caller.
+     */
+    private function request(
         string $method,
-        string $url,
-        ?string $accessToken,
+        string $path,
         ?array $payload = null,
-        array $additionalHeaders = []
+        ?string $bearerToken = null,
+        array $extraHeaders = []
     ): array {
+        $url = $this->apiUrl() . $path;
+
         $curl = curl_init($url);
 
         if ($curl === false) {
@@ -395,106 +555,125 @@ final class MpesaService
             'Accept: application/json',
         ];
 
-        if ($accessToken !== null) {
-            $headers[] = 'Authorization: Bearer ' . $accessToken;
-        }
-
         if ($payload !== null) {
-            $headers[] = 'Content-Type: application/json';
+            $headers[] =
+                'Content-Type: application/json';
+
+            $body = json_encode(
+                $payload,
+                JSON_THROW_ON_ERROR
+            );
+        } else {
+            $body = null;
         }
 
-        foreach ($additionalHeaders as $header) {
+        if (
+            $bearerToken !== null &&
+            trim($bearerToken) !== ''
+        ) {
+            $headers[] =
+                'Authorization: Bearer ' .
+                $bearerToken;
+        }
+
+        foreach ($extraHeaders as $header) {
             $headers[] = $header;
         }
 
         curl_setopt_array(
             $curl,
             [
-                CURLOPT_CUSTOMREQUEST => strtoupper($method),
                 CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CUSTOMREQUEST => $method,
                 CURLOPT_HTTPHEADER => $headers,
                 CURLOPT_CONNECTTIMEOUT => 10,
                 CURLOPT_TIMEOUT => 30,
-                CURLOPT_FOLLOWLOCATION => false,
                 CURLOPT_SSL_VERIFYPEER => true,
                 CURLOPT_SSL_VERIFYHOST => 2,
             ]
         );
 
-        if ($payload !== null) {
+        if ($body !== null) {
             curl_setopt(
                 $curl,
                 CURLOPT_POSTFIELDS,
-                json_encode(
-                    $payload,
-                    JSON_THROW_ON_ERROR
-                )
+                $body
             );
         }
 
-        $body = curl_exec($curl);
-        $error = curl_error($curl);
-        $httpCode = (int) curl_getinfo(
-            $curl,
-            CURLINFO_HTTP_CODE
-        );
+        $responseBody =
+            curl_exec($curl);
+
+        $curlError =
+            curl_error($curl);
+
+        $status =
+            (int) curl_getinfo(
+                $curl,
+                CURLINFO_HTTP_CODE
+            );
 
         curl_close($curl);
 
-        if ($body === false) {
+        if ($responseBody === false) {
             throw new RuntimeException(
-                'M-Pesa request failed.'
-                . ($error !== '' ? ' ' . $error : '')
+                'M-Pesa connection failed.'
             );
         }
 
-        if ($httpCode < 200 || $httpCode >= 300) {
+        if ($curlError !== '') {
             throw new RuntimeException(
-                'M-Pesa API request was rejected.'
+                'M-Pesa connection failed.'
             );
         }
 
-        try {
-            $decoded = json_decode(
-                $body,
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
-        } catch (\JsonException) {
+        $decoded = json_decode(
+            $responseBody,
+            true
+        );
+
+        if (!is_array($decoded)) {
             throw new RuntimeException(
                 'M-Pesa returned an invalid response.'
             );
         }
 
-        if (!is_array($decoded)) {
+        if ($status < 200 || $status >= 300) {
             throw new RuntimeException(
-                'M-Pesa returned an unexpected response.'
+                'M-Pesa request was rejected.'
             );
         }
 
         return $decoded;
     }
 
-    private static function apiUrl(string $path): string
+    /**
+     * Select sandbox or production Daraja URL.
+     */
+    private function apiUrl(): string
     {
         $environment = strtolower(
-            trim((string) ($_ENV['MPESA_ENVIRONMENT'] ?? 'sandbox'))
+            trim(
+                $_ENV['MPESA_ENV']
+                    ?? $_SERVER['MPESA_ENV']
+                    ?? 'sandbox'
+            )
         );
 
-        $base = $environment === 'production'
-            ? 'https://api.safaricom.co.ke/'
-            : 'https://sandbox.safaricom.co.ke/';
+        if ($environment === 'production') {
+            return 'https://api.safaricom.co.ke';
+        }
 
-        return rtrim($base, '/') . '/' . ltrim($path, '/');
+        return 'https://sandbox.safaricom.co.ke';
     }
 
-    private static function findPaymentByCheckoutRequest(
+    /**
+     * Locate payment by Daraja checkout request ID.
+     */
+    private function findPaymentByCheckoutRequest(
         string $checkoutRequestId
     ): ?array {
-        $connection = Database::connection();
-
-        $statement = $connection->prepare(
+        $statement = $this->connection->prepare(
             'SELECT *
              FROM recovery_payments
              WHERE checkout_request_id = :checkout_request_id
@@ -502,19 +681,35 @@ final class MpesaService
         );
 
         $statement->execute([
-            'checkout_request_id' => $checkoutRequestId,
+            'checkout_request_id' =>
+                $checkoutRequestId,
         ]);
 
         $payment = $statement->fetch();
 
-        return $payment !== false
-            ? $payment
-            : null;
+        return $payment === false
+            ? null
+            : $payment;
     }
 
-    private static function metadataToArray(
-        array $items
+    /**
+     * Convert CallbackMetadata.Item into a simple associative array.
+     */
+    private function metadataToArray(
+        mixed $metadata
     ): array {
+        if (!is_array($metadata)) {
+            return [];
+        }
+
+        $items =
+            $metadata['Item']
+            ?? [];
+
+        if (!is_array($items)) {
+            return [];
+        }
+
         $result = [];
 
         foreach ($items as $item) {
@@ -522,46 +717,65 @@ final class MpesaService
                 continue;
             }
 
-            $name = trim(
-                (string) ($item['Name'] ?? '')
-            );
+            $name =
+                $item['Name']
+                ?? null;
 
-            if ($name === '') {
+            if (!is_string($name) || $name === '') {
                 continue;
             }
 
-            $result[$name] = $item['Value'] ?? null;
+            $result[$name] =
+                $item['Value']
+                ?? null;
         }
 
         return $result;
     }
 
-    private static function normalizePhone(
+    /**
+     * Normalize a Kenyan mobile number to 254XXXXXXXXX.
+     */
+    public static function normalizePhone(
         string $phone
     ): string {
-        $phone = trim($phone);
-
         $phone = preg_replace(
-            '/[\s().-]+/',
+            '/[\s\-\(\)]/',
             '',
-            $phone
+            trim($phone)
         );
 
-        if ($phone === null) {
+        if ($phone === null || $phone === '') {
             throw new RuntimeException(
-                'Invalid Kenyan phone number.'
+                'Phone number is required.'
             );
         }
 
         if (str_starts_with($phone, '+254')) {
             $phone = substr($phone, 1);
-        } elseif (str_starts_with($phone, '07')) {
-            $phone = '254' . substr($phone, 1);
-        } elseif (str_starts_with($phone, '01')) {
-            $phone = '254' . substr($phone, 1);
         }
 
-        if (!preg_match('/^254(?:7\d{8}|1\d{8})$/', $phone)) {
+        if (str_starts_with($phone, '254')) {
+            // Already normalized.
+        } elseif (
+            str_starts_with($phone, '07') ||
+            str_starts_with($phone, '01')
+        ) {
+            $phone =
+                '254' .
+                substr($phone, 1);
+        } else {
+            throw new RuntimeException(
+                'Invalid Kenyan phone number.'
+            );
+        }
+
+        if (
+            preg_match(
+                '/^254(7\d{8}|1\d{8})$/',
+                $phone
+            ) !== 1
+        ) {
             throw new RuntimeException(
                 'Invalid Kenyan phone number.'
             );
@@ -570,7 +784,21 @@ final class MpesaService
         return $phone;
     }
 
-    private function __construct()
-    {
+    /**
+     * Validate UUID.
+     */
+    private function assertUuid(
+        string $value
+    ): void {
+        if (
+            preg_match(
+                '/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i',
+                $value
+            ) !== 1
+        ) {
+            throw new RuntimeException(
+                'Invalid recovery request ID.'
+            );
+        }
     }
 }
