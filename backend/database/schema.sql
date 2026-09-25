@@ -1,6 +1,6 @@
 -- ============================================================
 -- SCAN-ID
--- Lost ID Recovery Network Kenya
+-- Lost Document Recovery Network Kenya
 -- Fresh PostgreSQL Database Schema
 -- ============================================================
 
@@ -17,12 +17,14 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION set_updated_at()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
 BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- ============================================================
 -- USERS
@@ -102,7 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_expires
     ON user_sessions(expires_at);
 
 -- ============================================================
--- PHONE VERIFICATION
+-- PHONE VERIFICATIONS
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS phone_verifications (
@@ -141,10 +143,10 @@ CREATE INDEX IF NOT EXISTS idx_phone_verifications_expires
     ON phone_verifications(expires_at);
 
 -- ============================================================
--- LOST IDS
+-- LOST DOCUMENTS
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS lost_ids (
+CREATE TABLE IF NOT EXISTS lost_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     owner_user_id UUID
@@ -153,15 +155,27 @@ CREATE TABLE IF NOT EXISTS lost_ids (
 
     owner_phone VARCHAR(20) NOT NULL,
 
-    id_type VARCHAR(50) NOT NULL DEFAULT 'national_id',
+    document_type VARCHAR(50) NOT NULL DEFAULT 'national_id'
+        CHECK (
+            document_type IN (
+                'national_id',
+                'passport',
+                'driving_licence',
+                'student_id',
+                'staff_work_id',
+                'bank_atm_card',
+                'insurance_card',
+                'other'
+            )
+        ),
 
-    id_number_hash TEXT NOT NULL,
+    document_number_hash TEXT NOT NULL,
 
-    id_number_last4 VARCHAR(4),
+    document_number_last4 VARCHAR(4),
 
     last_known_location_general VARCHAR(255),
 
-    lost_at TIMESTAMPTZ,
+    lost_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     status VARCHAR(30) NOT NULL DEFAULT 'lost'
         CHECK (
@@ -180,31 +194,31 @@ CREATE TABLE IF NOT EXISTS lost_ids (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_lost_ids_hash
-    ON lost_ids(id_number_hash);
+CREATE INDEX IF NOT EXISTS idx_lost_documents_hash
+    ON lost_documents(document_number_hash);
 
-CREATE INDEX IF NOT EXISTS idx_lost_ids_status
-    ON lost_ids(status);
+CREATE INDEX IF NOT EXISTS idx_lost_documents_status
+    ON lost_documents(status);
 
-CREATE INDEX IF NOT EXISTS idx_lost_ids_owner
-    ON lost_ids(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_lost_documents_owner
+    ON lost_documents(owner_user_id);
 
-CREATE INDEX IF NOT EXISTS idx_lost_ids_phone
-    ON lost_ids(owner_phone);
+CREATE INDEX IF NOT EXISTS idx_lost_documents_phone
+    ON lost_documents(owner_phone);
 
-DROP TRIGGER IF EXISTS lost_ids_updated_at
-ON lost_ids;
+DROP TRIGGER IF EXISTS lost_documents_updated_at
+ON lost_documents;
 
-CREATE TRIGGER lost_ids_updated_at
-BEFORE UPDATE ON lost_ids
+CREATE TRIGGER lost_documents_updated_at
+BEFORE UPDATE ON lost_documents
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
 -- ============================================================
--- FOUND IDS
+-- FOUND DOCUMENTS
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS found_ids (
+CREATE TABLE IF NOT EXISTS found_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     finder_user_id UUID
@@ -212,16 +226,29 @@ CREATE TABLE IF NOT EXISTS found_ids (
         ON DELETE SET NULL,
 
     /*
-     * Allows a person to report a found document without
-     * creating a SCAN-ID account.
+     * A finder does not need a SCAN-ID account.
+     * Anonymous finders can provide a phone number.
      */
+
     finder_phone VARCHAR(20),
 
-    id_type VARCHAR(50) NOT NULL DEFAULT 'national_id',
+    document_type VARCHAR(50) NOT NULL DEFAULT 'national_id'
+        CHECK (
+            document_type IN (
+                'national_id',
+                'passport',
+                'driving_licence',
+                'student_id',
+                'staff_work_id',
+                'bank_atm_card',
+                'insurance_card',
+                'other'
+            )
+        ),
 
-    id_number_hash TEXT NOT NULL,
+    document_number_hash TEXT NOT NULL,
 
-    id_number_last4 VARCHAR(4),
+    document_number_last4 VARCHAR(4),
 
     found_location_general VARCHAR(255),
 
@@ -249,33 +276,34 @@ CREATE TABLE IF NOT EXISTS found_ids (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     /*
-     * A finder must have either:
-     * - a registered user account, or
-     * - a phone number for anonymous recovery contact.
+     * Finder must be identifiable either through:
+     * - registered SCAN-ID account, or
+     * - phone number.
      */
+
     CHECK (
         finder_user_id IS NOT NULL
         OR finder_phone IS NOT NULL
     )
 );
 
-CREATE INDEX IF NOT EXISTS idx_found_ids_hash
-    ON found_ids(id_number_hash);
+CREATE INDEX IF NOT EXISTS idx_found_documents_hash
+    ON found_documents(document_number_hash);
 
-CREATE INDEX IF NOT EXISTS idx_found_ids_status
-    ON found_ids(status);
+CREATE INDEX IF NOT EXISTS idx_found_documents_status
+    ON found_documents(status);
 
-CREATE INDEX IF NOT EXISTS idx_found_ids_finder
-    ON found_ids(finder_user_id);
+CREATE INDEX IF NOT EXISTS idx_found_documents_finder
+    ON found_documents(finder_user_id);
 
-CREATE INDEX IF NOT EXISTS idx_found_ids_phone
-    ON found_ids(finder_phone);
+CREATE INDEX IF NOT EXISTS idx_found_documents_phone
+    ON found_documents(finder_phone);
 
-DROP TRIGGER IF EXISTS found_ids_updated_at
-ON found_ids;
+DROP TRIGGER IF EXISTS found_documents_updated_at
+ON found_documents;
 
-CREATE TRIGGER found_ids_updated_at
-BEFORE UPDATE ON found_ids
+CREATE TRIGGER found_documents_updated_at
+BEFORE UPDATE ON found_documents
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
@@ -286,12 +314,12 @@ EXECUTE FUNCTION set_updated_at();
 CREATE TABLE IF NOT EXISTS recovery_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    lost_id_id UUID
-        REFERENCES lost_ids(id)
-        ON DELETE SET NULL,
+    lost_document_id UUID NOT NULL
+        REFERENCES lost_documents(id)
+        ON DELETE CASCADE,
 
-    found_id_id UUID NOT NULL
-        REFERENCES found_ids(id)
+    found_document_id UUID NOT NULL
+        REFERENCES found_documents(id)
         ON DELETE CASCADE,
 
     owner_user_id UUID
@@ -326,14 +354,19 @@ CREATE TABLE IF NOT EXISTS recovery_requests (
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (
+        lost_document_id,
+        found_document_id
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_recovery_requests_lost
-    ON recovery_requests(lost_id_id);
+    ON recovery_requests(lost_document_id);
 
 CREATE INDEX IF NOT EXISTS idx_recovery_requests_found
-    ON recovery_requests(found_id_id);
+    ON recovery_requests(found_document_id);
 
 CREATE INDEX IF NOT EXISTS idx_recovery_requests_owner
     ON recovery_requests(owner_user_id);
@@ -350,7 +383,7 @@ FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
 -- ============================================================
--- RECOVERY TOKENS
+-- SECURE RECOVERY TOKENS
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS recovery_tokens (
@@ -443,19 +476,19 @@ CREATE TABLE IF NOT EXISTS recovery_payments (
         ON DELETE CASCADE,
 
     /*
-     * SCAN-ID recovery payment:
-     *
      * Owner pays KSh 300 total.
      *
      * KSh 150 = finder reward
      * KSh 150 = SCAN-ID platform
      *
-     * No additional recovery fee is added.
+     * No additional recovery fee.
      */
-    amount_kes INTEGER NOT NULL DEFAULT 300
-        CHECK (amount_kes > 0),
 
-    provider VARCHAR(50) NOT NULL DEFAULT 'mpesa',
+    amount_kes INTEGER NOT NULL DEFAULT 300
+        CHECK (amount_kes = 300),
+
+    provider VARCHAR(50) NOT NULL DEFAULT 'mpesa'
+        CHECK (provider = 'mpesa'),
 
     checkout_request_id VARCHAR(255) UNIQUE,
 
@@ -506,19 +539,20 @@ EXECUTE FUNCTION set_updated_at();
 -- ============================================================
 -- FINDER REWARDS
 -- ============================================================
---
--- Finder reward lifecycle:
---
--- pending
---    ↓
--- payable
---    ↓
--- paid
---
--- The reward becomes payable ONLY after a verified handover.
---
--- Owner payment alone does NOT trigger the finder payout.
--- ============================================================
+
+/*
+ * Finder reward lifecycle:
+ *
+ * pending
+ *     ↓
+ * payable
+ *     ↓
+ * paid
+ *
+ * Reward becomes payable ONLY after verified handover.
+ *
+ * Owner payment alone does NOT release the reward.
+ */
 
 CREATE TABLE IF NOT EXISTS finder_rewards (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -530,7 +564,7 @@ CREATE TABLE IF NOT EXISTS finder_rewards (
     finder_phone VARCHAR(20) NOT NULL,
 
     amount_kes INTEGER NOT NULL DEFAULT 150
-        CHECK (amount_kes > 0),
+        CHECK (amount_kes = 150),
 
     status VARCHAR(30) NOT NULL DEFAULT 'pending'
         CHECK (
@@ -611,6 +645,9 @@ CREATE TABLE IF NOT EXISTS handovers (
 CREATE INDEX IF NOT EXISTS idx_handovers_status
     ON handovers(status);
 
+CREATE INDEX IF NOT EXISTS idx_handovers_scheduled
+    ON handovers(scheduled_at);
+
 DROP TRIGGER IF EXISTS handovers_updated_at
 ON handovers;
 
@@ -620,7 +657,7 @@ FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
 -- ============================================================
--- AUDIT LOG
+-- AUDIT LOGS
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -638,7 +675,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
     ip_address INET,
 
-    metadata JSONB,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -652,11 +689,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_entity
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action
     ON audit_logs(action);
 
-CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created
     ON audit_logs(created_at);
 
 -- ============================================================
--- SCHEMA VERSION
+-- SCHEMA VERSIONS
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS schema_versions (
@@ -672,9 +709,23 @@ INSERT INTO schema_versions (
     description
 )
 VALUES (
+    1,
+    'Create fresh SCAN-ID lost document recovery network schema'
+)
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO schema_versions (
+    version,
+    description
+)
+VALUES (
     2,
     'Add anonymous finder contact and finder reward system'
 )
 ON CONFLICT (version) DO NOTHING;
+
+-- ============================================================
+-- COMPLETE
+-- ============================================================
 
 COMMIT;
